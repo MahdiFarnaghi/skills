@@ -3,6 +3,8 @@ __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
+.cluache/
+.agents/
 
 # Skill packages (generated files)
 *.skill
