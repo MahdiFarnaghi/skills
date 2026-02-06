@@ -33,8 +33,9 @@ Create Dutch Anki cards from this vocabulary list:
 
 ## Input Format
 
-Accept vocabulary lists in this format:
+Accept vocabulary lists in multiple flexible formats:
 
+### Format 1: Standard with examples
 ```
 - word:
   Example sentence(s) in the source language.
@@ -42,14 +43,45 @@ Accept vocabulary lists in this format:
 - another_word:
   1. First example sentence.
   2. Second example sentence.
+```
 
-- phrase with article:
-  Contextual example showing usage.
+### Format 2: Without colons
+```
+- word
+  Example sentence.
+
+- another_word
+  Example here.
+```
+
+### Format 3: With inline translations
+```
+- word – English translation
+  Example sentence – English translation of example.
+
+- Verblijfsvergunning – Residence permit
+  Ik heb een geldige verblijfsvergunning. – I have a valid residence permit.
+```
+
+### Format 4: Phrases and complete sentences
+```
+- Kunt u dat alstublieft herhalen?
+  (Can you please repeat that?)
+
+- Hoe laat is het?
+  (What time is it?)
 ```
 
 Input may be:
 - Pasted directly in chat
 - Provided as a .txt file path
+
+### Parsing Rules
+- **Optional colons**: Words may end with `:` or not - both are accepted
+- **Inline translations**: Extract existing English translations from `– ` or ` - ` patterns instead of regenerating
+- **Phrases as entries**: Complete sentences and phrases are valid vocabulary items (not just single words)
+- **Example translations**: When examples have appended `– English translation`, split and use the provided translation
+- **Empty examples**: Entries without example sentences should have natural contextual examples generated
 
 ## CSV Output Columns
 
@@ -69,11 +101,19 @@ Input may be:
 
 ## Processing Rules
 
+### Input Parsing
+- **Optional colons**: Handle both `- word:` and `- word` formats
+- **Inline translations**: When input contains `word – translation`, extract and use the provided translation directly
+- **Example translations**: When examples contain `– English text`, extract and use for Example_eng field
+- **Phrases**: For complete sentences/phrases as entries, treat the entire phrase as the Front field
+- **Mixed formats**: A single input file may contain entries in multiple formats - handle each according to its pattern
+
 ### Front Field
 - Convert plural nouns to singular form
 - Convert conjugated verbs to infinitive
 - For uninflectable words, retain the form given
 - Remove any articles unless they're part of an idiom
+- For phrases/sentences: keep the original form as-is (do not simplify)
 
 ### Example Field
 - Use ALL provided example sentences
@@ -175,7 +215,28 @@ If you don't have a matching note type:
 
 ## Examples
 
-### Dutch Vocabulary
+### Dutch Vocabulary (Mixed Format)
+```
+- naturalisatie
+
+- naturalisatieaanvraag
+  Ik heb een afspraak voor een naturalisatieaanvraag.
+  De kosten voor de naturalisatieaanvraag zijn €1790.
+
+- Verblijfsvergunning – Residence permit
+  Ik heb een geldige verblijfsvergunning. – I have a valid residence permit.
+
+- Kunt u dat alstublieft herhalen?
+- Kunt u iets langzamer spreken, alstublieft?
+```
+
+Output handles:
+- Words without colons (`naturalisatie`)
+- Words with multiple examples (`naturalisatieaanvraag`)
+- Inline translations (`Verblijfsvergunning – Residence permit`)
+- Complete phrases as vocabulary items (`Kunt u dat alstublieft herhalen?`)
+
+### Standard Dutch Vocabulary
 ```
 - de appel:
   Ik eet elke dag een appel.
