@@ -98,6 +98,7 @@ Input may be:
 | Ant | One antonym in source language | No |
 | Word_type | Part of speech (noun, verb, adjective, etc.) | Yes |
 | Gram | Grammatical info (article, plural, conjugations, etc.) | No |
+| Roots_and_decomposition | Word decomposition: prefixes, roots, suffixes with meanings and how they combine | Yes |
 
 ## Processing Rules
 
@@ -141,6 +142,18 @@ Input may be:
 **Other types:**
 - Brief descriptive label as appropriate
 
+### Roots_and_decomposition Field
+- Break the word into its morphological components: prefixes, root words, and suffixes
+- Explain the meaning of each component
+- Describe how the components combine to form the word's overall meaning
+- For compound words, identify each constituent part
+- Examples:
+  - `naturalisatie` → `natuur (nature) + -alisatie (process of becoming)` → the process of becoming a citizen/naturalized
+  - `verblijfsvergunning` → `verblijf (stay/residence) + vergunning (permit)` → permit for staying/residing
+  - `onmogelijk` → `on- (un-/not) + mogelijk (possible)` → impossible
+  - `uitspraak` → `uit (out) + spraak (speech)` → pronunciation/statement
+- For phrases or sentences: state "N/A" since decomposition does not apply
+
 ### Synonyms and Antonyms
 - Provide up to 3 synonyms when applicable (comma-separated)
 - Provide 1 antonym when applicable
@@ -169,9 +182,9 @@ Generate a UTF-8 encoded CSV file with semicolon delimiters (Anki-compatible). F
 
 Example output structure:
 ```csv
-Front;Back;Desc;Desc_eng;Meaning;Example;Example_eng;Syn;Ant;Word_type;Gram
-hoop;;veel;erg veel;a lot;Er zijn een hoop dingen veranderd.;There are a lot of things changed.;veel,menigte,stuk;weinig;noun;de hoop
-lopen;;gaan te voet;to go on foot;Ik loop naar school.;I walk to school.;stappen,driften,wandelen;rennen;verb;liep, gelopen, hebben
+Front;Back;Desc;Desc_eng;Meaning;Example;Example_eng;Syn;Ant;Word_type;Gram;Roots_and_decomposition
+hoop;;veel;erg veel;a lot;Er zijn een hoop dingen veranderd.;There are a lot of things changed.;veel,menigte,stuk;weinig;noun;de hoop;hoop (heap/pile) — from Middle Dutch hop, referring to a pile or large quantity
+lopen;;gaan te voet;to go on foot;Ik loop naar school.;I walk to school.;stappen,driften,wandelen;rennen;verb;liep, gelopen, hebben;lopen (to walk/run) — from Middle Dutch lōpen, of Germanic origin
 ```
 
 ## Importing into Anki
