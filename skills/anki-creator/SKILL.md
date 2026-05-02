@@ -180,12 +180,16 @@ Adapt output language and grammatical categories accordingly.
 
 Generate a UTF-8 encoded CSV file with semicolon delimiters (Anki-compatible). Filename format: `anki-vocab-[language]-[timestamp].csv`
 
-Example output structure:
+**CRITICAL: Quoting Rule** — Any field value that contains a semicolon (`;`), double quote (`"`), or newline MUST be wrapped in double quotes. Double quotes inside a field must be escaped as `""`. This prevents Anki from misinterpreting field content as column boundaries. Apply this quoting to every row, not just the header.
+
+Example output structure (with proper quoting):
 ```csv
 Front;Back;Desc;Desc_eng;Meaning;Example;Example_eng;Syn;Ant;Word_type;Gram;Roots_and_decomposition
-hoop;;veel;erg veel;a lot;Er zijn een hoop dingen veranderd.;There are a lot of things changed.;veel,menigte,stuk;weinig;noun;de hoop;hoop (heap/pile) — from Middle Dutch hop, referring to a pile or large quantity
-lopen;;gaan te voet;to go on foot;Ik loop naar school.;I walk to school.;stappen,driften,wandelen;rennen;verb;liep, gelopen, hebben;lopen (to walk/run) — from Middle Dutch lōpen, of Germanic origin
+hoop;;veel;erg veel;a lot;Er zijn een hoop dingen veranderd.;There are a lot of things changed.;veel,menigte,stuk;weinig;noun;de hoop;"hoop (heap/pile) — from Middle Dutch hop, referring to a pile or large quantity"
+lopen;;"gaan te voet; wandelen";to go on foot;Ik loop naar school.;I walk to school.;stappen,driften,wandelen;rennen;verb;"liep, gelopen, hebben";lopen (to walk/run) — from Middle Dutch lōpen, of Germanic origin
 ```
+
+In the second row above, the Desc field contains a semicolon so it is quoted: `"gaan te voet; wandelen"`. Similarly, the Gram field `"liep, gelopen, hebben"` is quoted.
 
 ## Importing into Anki
 
@@ -218,6 +222,11 @@ If you don't have a matching note type:
 **Issue: Cards don't display correctly**
 - Verify the semicolon delimiter is selected in Anki import dialog
 - Check that column names match your note type fields exactly
+
+**Issue: Fields are misaligned after import (some records have shifted columns)**
+- A field value contains the semicolon delimiter (`;`), causing Anki to split it into two columns
+- Fix: ensure all fields containing `;` or `"` are properly double-quoted in the CSV
+- This is the most common cause of misaligned fields — always quote fields with special characters
 
 **Issue: Examples are cut off**
 - Anki handles long text fields well, but consider splitting very long examples
