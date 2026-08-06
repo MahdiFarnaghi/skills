@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex-Reviewed Implementation"
+  short_description: "Bounded implementation with independent Codex milestone review"
+  default_prompt: "Use $codex-reviewed-implementation to plan, implement test-first, verify Docker-first when applicable, and deliver this substantial or high-risk task in bounded milestones with independent Codex milestone review."
