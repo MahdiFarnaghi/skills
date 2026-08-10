@@ -13,7 +13,7 @@ Before planning, select and record one profile. Use the least ceremonial profile
 
 ### Lightweight
 
-Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; run one independent Codex implementation review; treat that milestone review as the final integration review unless its findings expose broader risk. Do not require a `continue` turn when the task is complete.
+Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; request one independent Codex milestone review (one operator command); treat that milestone review as the final integration review unless its findings expose broader risk. No additional handoff turn is required once the single milestone is accepted.
 
 ### Standard
 
@@ -26,7 +26,7 @@ Required for security, privacy, financial, durable-state, distributed, concurren
 ## Preconditions
 
 1. Read the repository instructions, authoritative task artifacts, current-system documentation, and relevant design decisions.
-2. Confirm the independent Codex review transport is available and that the installed `openai/codex-plugin-cc` behavior matches the adapter assumptions before relying on it. Follow [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md).
+2. Confirm the Codex review transport: cumulative milestone reviews are operator-invoked (`disable-model-invocation`), and the optional stop gate is turn-scoped only. Verify the installed `openai-codex/codex` plugin behavior matches [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md) before relying on it.
 3. If the configured review transport is unavailable, pause before implementation and follow the adapter's operator fallback. Do not silently weaken the requested workflow.
 
 Before planning, inspect registered worktrees, active branches, HEAD, tracked and untracked changes, and any existing task ownership. Do not begin when another branch, worktree, agent, or process owns overlapping scope until ownership is reconciled. Use an isolated branch or worktree when repository policy requires it or when separation materially reduces risk; never create one without respecting user authorization and existing work.
@@ -121,7 +121,7 @@ Prepare a compact plan packet from [references/plan-packet.md](references/plan-p
 
 Use only one plan-review correction round by default. Classify Codex suggestions as `accept`, `disprove`, `defer`, or `escalate` using the same evidence rules as implementation findings. Incorporate accepted improvements, explain disproved or deferred suggestions compactly, and escalate architecture or authority decisions to the user. Then freeze milestone names, contracts, dependencies, and non-goals before editing production artifacts.
 
-The review target and continuation mechanics are transport-dependent; see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). Never create fake tracked changes or commits to manufacture a plan-review target.
+Plan review runs through an operator-invoked scoped review command; see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). Never create fake tracked changes or commits to manufacture a review target, and never treat a turn-scoped stop-gate result as a plan review.
 
 ## Execute one milestone
 
@@ -136,13 +136,15 @@ For each milestone:
 7. **Inspect architecture** — review the diff and tests against the post-green checklist in [references/safety-lifecycle.md](references/safety-lifecycle.md). Remove false claims, accidental scope, duplicated mechanisms, permissive fallbacks, temporary artifacts, and unsafe shortcuts.
 8. **Reconcile evidence and docs** — update the acceptance ledger and current-state documentation with exact results, skips, limitations, and decisions.
 9. **Prepare** — create a compact review packet from [references/review-packet.md](references/review-packet.md). Validate it with `scripts/validate_review_packet.py`.
-10. **Request review** — request an independent, read-only Codex review through the configured adapter ([references/codex-plugin-adapter.md](references/codex-plugin-adapter.md)) with the review packet as routing information.
+10. **Request review** — give the operator ONE exact scoped review command with concise focus text distilled from the prepared packet — name the milestone, the reviewed scope, and the key concerns (for example `/codex:adversarial-review --wait --scope working-tree <focus text>`). See [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). Pause without claiming acceptance; never pretend to invoke the command or call private plugin scripts.
 
-The review packet routes attention; it is not proof. Codex must inspect the repository diff and tests independently.
+The packet routes the reviewer's attention; it is not proof. The reviewer must inspect the repository diff and tests independently.
+
+11. **Validate the verdict** — after the operator runs the command, inspect the resulting job. Accept the milestone only on a scoped `verdict: approve` from a review-class job that substantively addresses this milestone. A turn-scoped stop-gate `ALLOW` (no code changes / status-only / checks-only / documentation-only) is never milestone acceptance. On `needs-attention`, handle findings per *Handle a blocked review*; on failure, timeout, or missing output, record that no verdict occurred and follow the adapter's operator fallback.
 
 ## Increase reviewer independence
 
-Claude picks the directed questions and can unintentionally constrain Codex to risks Claude already found. Every plan and milestone review therefore requires two passes:
+Claude picks the directed questions and can unintentionally constrain Codex to risks Claude already found. Every plan and milestone review therefore requires two passes, delivered as the focus text of one operator-invoked scoped review command (the turn-scoped stop gate does not consume these passes):
 
 - **Pass 1 — independent sweep.** The packet's independent-review mandate directs Codex to inspect the specification, diff, affected callers and flows, tests, and evidence on its own; to choose its own highest-risk attack surface; and to report material counterexamples, affected flows, or missing proof that Claude did not identify. Claude's directed questions must not constrain this pass.
 - **Pass 2 — directed challenge.** Codex then answers zero to three optional directed questions supplied by Claude. "None" is valid; do not invent questions merely to fill the section.
@@ -164,7 +166,7 @@ For accepted findings:
 2. add or strengthen regression evidence;
 3. rerun affected verification tiers;
 4. update the evidence ledger, documentation, and packet with the correction and exact results;
-5. request re-review through the configured adapter.
+5. request another explicit scoped milestone review (see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md)); do not retry unchanged stop/status turns to obtain acceptance.
 
 For disproved findings, include concise evidence in the next packet. Do not argue from intention or passing tests alone. For deferred findings, explain why the milestone remains correct without them and record the limitation in the appropriate project artifact when required.
 
@@ -172,7 +174,7 @@ Escalate if the same material defect survives two correction reviews, a finding 
 
 ## Advance between milestones
 
-Whether a successful review ends the turn and requires a one-word `continue` to proceed is transport-dependent; see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). In transports that require it, leave a compact accepted-milestone checkpoint and ask the user to reply `continue`; on continuation, reread repository state, verify the accepted baseline and worktree ownership, and proceed without restating completed history. Never replace that boundary with manual copying of Codex reports or large corrective prompts. In the Lightweight profile, no `continue` turn is required when the task is complete.
+Milestone review is operator-invoked: after preparing and validating the packet, Claude gives the operator one exact scoped review command and pauses. Once the operator runs it and shares a valid scoped `verdict: approve`, Claude resumes — reread repository state, verify the accepted baseline and worktree ownership, and proceed to the next milestone without restating completed history. Distinguish three things: (a) invoking the review command, done by the operator; (b) resuming Claude afterward, once a valid scoped verdict is in hand; (c) the transport-generated turn-level stop review, which is automatic, turn-scoped, and not a milestone gate. Never mistake a stop-gate `ALLOW` for milestone acceptance, and never replace the milestone boundary with manual copying of Codex reports or large corrective prompts. See [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md).
 
 When checkpoint commits are authorized, commit only an accepted, verified milestone and record its hash in the ledger. Never commit merely to manufacture a review target.
 
@@ -197,7 +199,7 @@ After all milestones are individually accepted:
 2. run the complete repository-required and applicable tiered verification in a hermetic environment, prioritizing the documented Docker stack when the project is Dockerized;
 3. inspect interactions across milestones, migrations, error paths, recovery, cleanup, and documentation;
 4. prepare a final packet covering only cross-milestone risks and exact final results;
-5. pass the final independent Codex review through the configured adapter;
+5. pass the final independent Codex review through an explicit scoped operator-invoked command and obtain a valid scoped `verdict: approve` (see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md));
 6. perform only explicitly authorized delivery actions.
 
 In the Lightweight profile, the single milestone review stands as the final integration review unless its findings expose broader risk. Do not claim completion while a material finding, required test, documentation update, cleanup obligation, or delivery action remains unresolved.

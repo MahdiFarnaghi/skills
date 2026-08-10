@@ -1,6 +1,6 @@
 # Compact review packet
 
-Use this template at a milestone review boundary. Keep it factual, repository-addressable, and under 8,000 characters. Omit empty optional sections.
+Use this template at a milestone review boundary. Keep it factual, repository-addressable, and under 8,000 characters. Omit empty optional sections. Distill the completed packet into concise focus text for one operator-invoked scoped review command (for example `/codex:adversarial-review --wait --scope working-tree`); the reviewer inspects the working-tree diff independently, and the packet is not consumed by the turn-scoped stop gate. `/codex:review` takes no focus text. See [codex-plugin-adapter.md](codex-plugin-adapter.md).
 
 ```md
 # Codex milestone review
