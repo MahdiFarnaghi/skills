@@ -1,76 +1,70 @@
 # Codex review adapter (openai-codex/codex plugin, v1.0.6)
 
-Isolates version-sensitive plugin transport from the core workflow. The core skill stays transport-neutral: request an independent, read-only Codex milestone review, then verify the resulting verdict. This reference states exactly what the installed plugin provides, the two distinct review transports, and how to fail safely when behavior differs. The plugin command namespace is `codex` (commands appear as `/codex:...`).
+Isolates version-sensitive plugin transport from the core workflow. The skill's intended mode is **autonomous supervision**: Claude contacts Codex directly through a public model-callable review transport, converges on approval, and stops at the boundary. This reference defines the required capability contract and states truthfully whether the installed plugin provides it. The plugin command namespace is `codex` (commands appear as `/codex:...`).
 
-## Two distinct review transports
+## Required transport capability contract
 
-The plugin provides two review transports with different scopes, outputs, and invocation models. Do not confuse them.
+Autonomous milestone supervision is supported only when ALL of the following are available in one public, model-callable interface:
 
-### Turn-scoped stop review (the Stop hook)
+1. **Public model invocation** — Claude may invoke a review without an operator.
+2. **Cumulative or baseline-relative Git scope** — working tree, branch, or diff from a named baseline.
+3. **Read-only reviewer** — Codex cannot modify production artifacts during review.
+4. **Structured verdict and findings** — `verdict: approve|needs-attention` with severity, file/location, evidence, and recommendation.
+5. **Wait/status/result lifecycle** — Claude can wait for and retrieve the tracked result.
+6. **Stable job identity and target** — a review job whose `Target` records the reviewed scope, with provenance distinct from ordinary task jobs and stop-hook results.
+7. **Origin marking and recursion prevention** — a review launched by Claude is marked as a Codex review from Claude with bounded delegation depth, and Codex performs it directly without delegating back to Claude.
 
-- Fires automatically on every Claude `Stop` event when `config.stopReviewGate` is true (set by `/codex:setup --enable-review-gate`).
-- Reviews ONLY the immediately preceding Claude turn. Its sole input is that turn's assistant message. It reads no review packet, no Git scope, no baseline, and no earlier turn.
-- Output: a single first line `ALLOW: <reason>` or `BLOCK: <reason>` (free text). Job records show `jobClass: task`, `kindLabel: rescue`, `title: "Codex Stop Gate Review"`.
-- By design it returns `ALLOW` without investigation whenever the previous turn made no direct code changes (status, setup, reporting, checks-only, or documentation-only turns). These `ALLOW`s are not verdicts for any milestone.
-- A prose packet in the turn does NOT expand its scope, and it attaches no packet-directed diff.
-- Use: optional immediate feedback on the edits made in one specific turn. It is NOT the milestone acceptance gate. Never treat a stop-gate `ALLOW` as cumulative milestone acceptance.
+If any capability is missing, autonomous supervision is unavailable; name exactly which capability is absent.
 
-### Explicit milestone review (operator-invoked commands)
+## Capability verdict for plugin v1.0.6 — autonomous supervision is NOT operational
 
-- Public commands `/codex:adversarial-review` and `/codex:review` review a real Git scope: `--scope working-tree|branch|auto`, optionally `--base <ref>`. `/codex:adversarial-review` also accepts free-text focus routing after the flags; `/codex:review` does not.
-- `disable-model-invocation: true`: Claude CANNOT invoke them. The operator must. Claude prepares the packet and pauses with one exact command; it never pretends to run the command and never calls private plugin scripts.
-- Use `--wait` so the job completes and writes its result before control returns.
-- Output is structured JSON `{"verdict":"approve"|"needs-attention","summary":...,"findings":[...],"next_steps":[...]}`, rendered as Markdown with a `Target:` line (the reviewed Git scope), a `Verdict:` line, findings with `file:line`, severity, and recommendation, and `Next steps`. Job records show `jobClass: review`, `kind: adversarial-review` (or `review`).
-- This is the ONLY transport that performs a cumulative milestone review of the working tree, branch, or a base diff.
+Inspected surfaces (commands, agents, skills, MCP):
 
-Note the output contracts differ: the stop gate emits free-text `ALLOW:`/`BLOCK:`; the operator commands emit structured `verdict: approve|needs-attention`. A milestone is accepted on a scoped `verdict: approve`, never on a stop-gate `ALLOW:`.
+- `/codex:review` and `/codex:adversarial-review` are the ONLY structured-review transports: `--scope auto|working-tree|branch`, `--base <ref>`, `--wait`, structured `verdict: approve|needs-attention` with findings, `jobClass: review`, read-only. Both carry `disable-model-invocation: true` — Claude CANNOT invoke them. `/codex:transfer` is likewise operator-only. (Capabilities 2–6 are present but operator-gated; capability 1 is absent.)
+- `/codex:rescue` and the `codex-rescue` agent ARE model-callable, but they forward to a general Codex `task` that defaults to `--write` (write-capable), returns free-form text, records an ordinary task job (`jobClass: task`, `kindLabel: rescue`), and are explicitly barred from calling `review`. This is a task-delegation surface, not a review transport. Using it as a review would violate read-only operation (3), structured verdict (4), and review provenance (6), and would simulate a result.
+- No MCP server or MCP tool is declared by the plugin. `codex-cli-runtime` is `user-invocable: false`, internal to the rescue agent.
+- The plugin's `codex-result-handling` guidance forbids auto-applying review fixes and requires asking the user before any change, which conflicts with the autonomous fix-and-rereview loop.
+- No origin/delegation metadata exists (capability 7 absent).
 
-## Request a milestone review
+Missing for autonomous supervision: capability **1** (public model-callable review invocation), capability **7** (origin marking + recursion prevention), and a result-handling rule that permits Claude-initiated correction cycles.
 
-At every cumulative milestone, plan-challenge, or final-integration boundary:
+## Primary mode — autonomous model-callable review (intended; not yet provided)
 
-1. Finish implementation and verification, reconcile the evidence ledger and docs, and prepare and validate the compact packet.
-2. Give the operator ONE exact documented command with concise focus text distilled from the packet (name the milestone, the reviewed scope, and the key concerns), for example:
-   `/codex:adversarial-review --wait --scope working-tree <focus text>`
-   Match the command scope to the packet's Diff mode: `cumulative working tree` → `--scope working-tree`; `isolated since baseline` → `--base <ref>` (or `--scope branch`). `/codex:review` is the non-adversarial variant and takes no focus text.
-3. Pause without claiming acceptance. Do not instruct the operator to copy reports between systems; read the result from the plugin job.
+When a future plugin version supplies the capability contract, Claude operates autonomously:
 
-The packet routes the reviewer's attention; it is not proof. The reviewer inspects the repository diff and tests independently.
+- invoke the public model-callable review transport directly with the milestone scope and the compact review focus (the validated packet);
+- wait for the tracked review result (`--wait` or status/result retrieval);
+- validate the result is a completed review-class job whose `Target` matches the intended scope, concerns the milestone and actual affected code, and carries a structured verdict;
+- on `needs-attention`, classify findings, fix accepted ones, rerun verification, and re-invoke until `verdict: approve`;
+- stop at the milestone boundary only after approval.
 
-## Validate a milestone verdict
+Read-only enforcement and recursion protection must come from the transport, not from skill prose. Never call private plugin scripts (e.g. `codex-companion.mjs`) directly, never simulate a result, never manufacture fake Git changes or commits, and never use the write-capable rescue/task surface as a review.
 
-After the operator runs the command, inspect the resulting job (the operator can show it via `/codex:result <job-id>` or `/codex:status <job-id>`). A valid milestone verdict requires ALL of:
+## Fallback mode — operator-mediated review
 
-- the job completed successfully (`status: completed`, `phase: done`) and is a review-class job (`jobClass: review`), not a stop-gate task;
-- its output carries a structured `verdict` — `approve` to accept, `needs-attention` (with findings) to block — and a `Target:` line naming the intended Git scope;
-- it substantively identifies or addresses the named milestone (it names the milestone and the actual code paths reviewed), not merely the previous turn;
-- it is not a turn-scoped stop-gate `ALLOW` saying the previous turn made no code changes / was status-only / checks-only / documentation-only.
+Until the primary mode exists, review is operator-mediated and is a FALLBACK, not the intended workflow:
 
-If `verdict: needs-attention` (or any finding), classify each finding (`accept`/`disprove`/`defer`/`escalate`), correct accepted findings, rerun the affected evidence, then request another explicit scoped milestone review. Only a scoped `verdict: approve` closes the milestone.
+- `/codex:adversarial-review --wait --scope working-tree <focus>` (or `/codex:review`, which takes no focus; `--base <ref>` or `--scope branch` are alternatives). Match the packet's Diff mode to the scope (`cumulative working tree` → `--scope working-tree`; `isolated since baseline` → `--base <ref>`).
+- `disable-model-invocation: true` means the operator must run it; Claude prepares the packet, gives one exact command, and pauses. Each correction re-review needs another explicit operator command.
+- This fallback must be explicitly accepted by the user. It does NOT satisfy a request for unattended milestone supervision, and the skill must not present it as such.
 
-If the job fails, times out, exits status 1, produces no output, or yields only a turn-level stop-gate verdict, treat it as NO milestone verdict: record that no verdict occurred and follow the operator fallback. Never retry unchanged stop/status turns to obtain acceptance.
+## Turn-scoped stop review (Stop hook)
 
-## Re-review after corrections
+Separate and distinct from cumulative review:
 
-Corrections and the final integration review each require their own explicit scoped milestone-review invocation. Re-emitting a packet, making a no-op or artificial edit, or repeatedly ending turns does NOT turn the stop gate into a cumulative review and cannot produce a milestone verdict.
+- Fires on every `Stop` when `config.stopReviewGate` is true; reviews ONLY the immediately preceding Claude turn (`last_assistant_message`); reads no packet, Git scope, baseline, or earlier turn.
+- Emits a free-text first line `ALLOW: <reason>` or `BLOCK: <reason>`; `jobClass: task`, `kindLabel: rescue`, title `Codex Stop Gate Review`.
+- Returns `ALLOW` by design for non-code turns (status/setup/reporting/checks/docs). A prose packet does not expand its scope.
+- A stop-gate `ALLOW` is NEVER milestone approval. Repeated stop turns cannot manufacture cumulative approval.
 
-## Unattended cumulative review is not supported (plugin v1.0.6)
+The repository's `quality_check_reminder.sh` Stop hook (when present) is unrelated and non-blocking; it never records a review verdict.
 
-Fully unattended cumulative milestone review is NOT available through the stop gate: the stop gate reviews only the preceding turn, and the cumulative-scope review commands disable model invocation. Skill prose cannot add this capability. Do not claim hands-off milestone review is enabled merely because `stopReviewGate` is true. Enabling the stop gate remains optional for turn-level feedback only.
+## Recursion protection
 
-If the user requires completely unattended cumulative milestone reviews with no operator command, the workflow is blocked by the current plugin capability. Surface this plainly and explain that a plugin enhancement (a persisted review request plus Git scope for stop-time execution) is required. Do not fake unattended behavior with private scripts, fabricated review targets, false review claims, or repeated stop turns.
+A Codex review launched by Claude must be marked as a Codex review originating from Claude (e.g. `hostOrigin: claude-code`, `jobPurpose: codex-review`, bounded delegation depth, or the transport's supported equivalent) and Codex must perform it directly — it must not delegate the review back to Claude through a reverse-direction review or the rescue path. Plugin v1.0.6 provides no such marking; this is part of why autonomous supervision is unavailable.
 
-## Setup and assumption checks
+## Decision procedure
 
-Confirm each before relying on the transport:
-
-1. The plugin is installed and `/codex:setup` succeeds.
-2. The stop gate is optional and turn-scoped; enabling it (`/codex:setup --enable-review-gate`) does NOT enable cumulative milestone review. It may remain enabled for turn-level feedback.
-3. The cumulative milestone review commands exist and disable model invocation, so milestone review is operator-invoked, not self-invoked.
-4. The repository's `quality_check_reminder.sh` Stop hook (when present) is unrelated and non-blocking: it only nudges running repository checks and exits 0; it never records a review verdict. Never mistake it for a review block or verdict.
-
-If installed behavior contradicts the above, stop, report the exact mismatch, and follow the operator fallback.
-
-## Operator fallback
-
-If the plugin or the milestone review command is unavailable, or installed behavior contradicts the assumptions above, pause before implementation and offer either ordinary Claude-only execution (with the milestone review explicitly waived by the user) or an operator-invoked scoped review. Report the exact reason a milestone verdict could not be obtained. Never silently claim a milestone review occurred and never weaken the requested workflow without surfacing the fallback.
+1. Run the capability check above against the installed plugin.
+2. If all seven capabilities are present → primary (autonomous) mode.
+3. If any is absent → autonomous supervision is unavailable. If the user's workflow requires it, STOP and report the exact missing capability and the required plugin enhancement. Offer operator-mediated review only as an explicitly accepted fallback; never silently downgrade to Claude-only execution.

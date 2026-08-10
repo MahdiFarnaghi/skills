@@ -1,6 +1,6 @@
 # Compact plan-review packet
 
-Use this template before implementation when the profile requires a plan challenge. Keep it repository-addressable and under 8,000 characters. Distill the completed packet into concise focus text for one operator-invoked scoped review command (e.g. `/codex:adversarial-review`); it is not consumed by the turn-scoped stop gate. See [codex-plugin-adapter.md](codex-plugin-adapter.md).
+Use this template before implementation when the profile requires a plan challenge. Keep it repository-addressable and under 8,000 characters. Supply the completed packet as compact review input to the public model-callable Codex review transport (see [codex-plugin-adapter.md](codex-plugin-adapter.md)); it is not consumed by the turn-scoped stop gate.
 
 ```md
 # Codex plan review
