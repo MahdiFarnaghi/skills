@@ -1,6 +1,6 @@
 # Compact plan-review packet
 
-Use this template before implementation when the profile requires a plan challenge. Keep it repository-addressable and under 8,000 characters. Supply the completed packet as compact review input to the public model-callable Codex review transport (see [codex-plugin-adapter.md](codex-plugin-adapter.md)); it is not consumed by the turn-scoped stop gate.
+Use this template before implementation when the profile requires a plan challenge. Keep it repository-addressable and under 8,000 characters. Validate it with `scripts/validate_review_packet.py`, then pass it as the `--packet` argument to `scripts/run_codex_review.py review` (see [codex-cli-adapter.md](codex-cli-adapter.md)); it is not consumed by the turn-scoped stop gate.
 
 ```md
 # Codex plan review

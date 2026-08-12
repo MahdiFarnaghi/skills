@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skills.local/codex-reviewed-implementation/codex-review-output.schema.json",
+  "title": "Codex review verdict",
+  "description": "Structured output contract for a read-only, worktree-bound Codex milestone or plan review. The wrapper (scripts/run_codex_review.py) passes this schema to `codex exec --output-schema` and then re-validates the result locally against the same invariants. Approval is accepted only from a schema-valid, target-matched verdict with no blocking findings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "target", "findings", "next_steps"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "needs-attention"],
+      "description": "approve only when no material blocking finding remains for this target."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One to three sentence summary of the reviewed change and the verdict rationale."
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "worktree", "scope", "baseline"],
+      "description": "The exact target this verdict covers. The wrapper rejects a verdict whose target does not match the bound worktree, scope, and baseline.",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to the reviewed repository (git toplevel)."
+        },
+        "worktree": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to the exact worktree reviewed."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["uncommitted", "base", "commit"],
+          "description": "The review scope selector that was used."
+        },
+        "baseline": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The baseline reference (branch for base scope, commit sha for commit scope, or the HEAD sha for uncommitted scope)."
+        },
+        "target_ref": {
+          "type": "string",
+          "description": "Optional further target identity, e.g. the target commit sha or dirty-state digest."
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Material findings. An approve verdict must contain no critical or high severity finding. Zero findings is valid only with verdict approve.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "title", "explanation", "evidence", "affected_behavior", "recommendation"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^F-[A-Za-z0-9_-]+$",
+            "description": "Stable finding identifier unique within this verdict, e.g. F-1, F-auth-leak."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "description": "Repository-relative path when the finding is localized."
+          },
+          "line": {
+            "type": ["integer", "string"],
+            "minimum": 1,
+            "description": "Line number or range string (e.g. 42 or '42-58') when applicable."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Concrete repository evidence or a minimal counterexample that substantiates the finding."
+          },
+          "affected_behavior": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The observable behavior, invariant, or flow that is affected."
+          },
+          "recommendation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The smallest concrete correction that addresses the root cause."
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "string",
+      "description": "What should happen next: for approve, the milestone may advance; for needs-attention, the accepted findings should be corrected and the review re-run."
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # Compact review packet
 
-Use this template at a milestone review boundary. Keep it factual, repository-addressable, and under 8,000 characters. Omit empty optional sections. Supply the completed packet as compact review input to the public model-callable Codex review transport (see [codex-plugin-adapter.md](codex-plugin-adapter.md)): it names the milestone, the Git scope, and the focus for the reviewer, which inspects the working-tree diff independently. The packet routes attention; it is not proof, and it is not consumed by the turn-scoped stop gate.
+Use this template at a milestone review boundary. Keep it factual, repository-addressable, and under 8,000 characters. Omit empty optional sections. Validate it with `scripts/validate_review_packet.py`, then pass it as the `--packet` argument to `scripts/run_codex_review.py review` (see [codex-cli-adapter.md](codex-cli-adapter.md)): it names the milestone, the Git scope, and the focus for the reviewer, which inspects the working-tree diff independently. The packet routes attention; it is not proof, and it is not consumed by the turn-scoped stop gate.
 
 ```md
 # Codex milestone review

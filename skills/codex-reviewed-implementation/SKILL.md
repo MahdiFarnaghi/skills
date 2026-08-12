@@ -1,11 +1,11 @@
 ---
 name: codex-reviewed-implementation
-description: Plan, implement, verify, and deliver substantial or high-risk software changes in bounded milestones, with Claude Code as the sole writer and Codex as an independent, read-only reviewer under autonomous supervision at each milestone boundary. Trigger implicitly only for dual-model work involving durable-state, concurrency, migration, security, privacy, financial, compatibility, or cross-stack risk — not routine fixes, small refactors, or documentation-only changes. When invoked explicitly by name, use it regardless of task size.
+description: Plan, implement, verify, and deliver substantial or high-risk software changes in bounded milestones, with Claude Code as the sole writer and Codex as an independent, read-only reviewer under autonomous CLI supervision at each milestone boundary. Trigger implicitly only for dual-model work involving durable-state, concurrency, migration, security, privacy, financial, compatibility, or cross-stack risk — not routine fixes, small refactors, or documentation-only changes. When invoked explicitly by name, use it regardless of task size.
 ---
 
 # Codex-Reviewed Implementation
 
-Own implementation continuously; Claude is the sole production-artifact writer. Treat Codex as an independent, read-only reviewer under autonomous supervision: at each boundary, contact it directly through the review transport, evaluate findings, fix accepted problems, rerun verification, and re-review until it approves, then stop. Autonomous supervision requires a public model-callable review transport; if the installed plugin lacks it, do not pretend it works — see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md).
+Own implementation continuously; Claude is the sole production-artifact writer. Treat Codex as an independent, read-only reviewer under autonomous supervision: at each boundary, invoke it directly through the Codex CLI wrapper (`scripts/run_codex_review.py`), evaluate its structured findings, fix accepted problems, rerun verification, and re-review until it returns a valid scoped `verdict: approve`, then stop. Autonomous supervision is gated on a preflight check of the wrapper; if preflight fails, do not pretend review works — see [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
 
 ## Select a workflow profile
 
@@ -13,7 +13,7 @@ Before planning, select and record one profile. Use the least ceremonial profile
 
 ### Lightweight
 
-Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; run one independent Codex milestone review under autonomous supervision (or, if the transport is unavailable and the user approves, one operator-mediated review); treat that milestone review as the final integration review unless its findings expose broader risk. Stop at the milestone boundary once Codex approves.
+Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; run one independent Codex milestone review under autonomous supervision (or, if preflight fails and the user approves, one operator-mediated review); treat that milestone review as the final integration review unless its findings expose broader risk. Stop at the milestone boundary once Codex approves.
 
 ### Standard
 
@@ -26,8 +26,8 @@ Required for security, privacy, financial, durable-state, distributed, concurren
 ## Preconditions
 
 1. Read the repository instructions, authoritative task artifacts, current-system documentation, and relevant design decisions.
-2. Detect the review transport capability ([references/codex-plugin-adapter.md](references/codex-plugin-adapter.md)): determine whether a public model-callable Codex review transport exists and supports cumulative Git scope, read-only operation, a structured verdict, wait/result retrieval, stable review-job provenance, and recursion protection.
-3. If autonomous supervision is required and the transport is absent or incomplete, STOP before implementation and report the exact missing capability. Offer operator-mediated review only as an explicit, user-approved fallback. Never silently downgrade to Claude-only execution.
+2. Run the transport preflight: `python3 scripts/run_codex_review.py preflight --schema schemas/codex-review-output.schema.json` (add `--worktree <abs-root>` to sanity-check the implementation worktree). Preflight verifies the Codex CLI is present and supported, authenticated, that the `review` surface accepts read-only and worktree binding at the `exec` level, and that the verdict schema parses — all without spending Codex usage. See [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
+3. If preflight fails, STOP before implementation and report the exact failure (missing CLI, failed authentication, unsupported version, or changed transport shape). Offer operator-mediated review only as an explicit, user-approved fallback that is not equivalent to automation. Never silently downgrade to Claude-only execution.
 
 Before planning, inspect registered worktrees, active branches, HEAD, tracked and untracked changes, and any existing task ownership. Do not begin when another branch, worktree, agent, or process owns overlapping scope until ownership is reconciled. Use an isolated branch or worktree when repository policy requires it or when separation materially reduces risk; never create one without respecting user authorization and existing work.
 
@@ -35,11 +35,15 @@ Detect whether the project is Dockerized by inspecting repository instructions, 
 
 ## Review supervision mode
 
-Supervision is autonomous by intent: Claude invokes the public model-callable Codex review transport directly, waits for the scoped result, classifies findings, fixes accepted ones, reruns verification, and re-invokes Codex until it returns a valid scoped `verdict: approve`, then stops at the boundary. The user intervenes only at approval boundaries or genuine escalations.
+Supervision is autonomous: Claude invokes Codex directly through `scripts/run_codex_review.py`, bound to the exact implementation worktree, read-only, with closed stdin and a bounded timeout. The wrapper returns a structured verdict validated locally against `schemas/codex-review-output.schema.json`; Claude classifies findings, fixes accepted ones, reruns verification, and re-invokes until a valid scoped `verdict: approve`, then stops at the boundary. The user intervenes only at approval boundaries or genuine escalations.
 
-This mode is gated on the transport capability in [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). As of plugin v1.0.6 the required public model-callable review transport does NOT exist, so autonomous supervision is unavailable; follow the capability check in *Preconditions* and the adapter's fallback. Never claim autonomous supervision when the transport cannot provide it, never call private plugin scripts, never treat the turn-scoped stop hook or a write-capable task delegation as a cumulative review, and never allow Codex to write production artifacts.
+This mode is gated on preflight (Preconditions) and on the capability contract in [references/codex-cli-adapter.md](references/codex-cli-adapter.md). The wrapper uses the verified invocation `codex exec -C <worktree> -s read-only review <scope> --output-schema <schema> -o <out> --ephemeral --ignore-rules`; the `review` subcommand rejects `-C`/`-s`, so worktree binding and read-only forcing sit at the `exec` level. Never claim autonomous supervision when preflight cannot prove the transport. Never call private plugin scripts (e.g. `codex-companion.mjs`), never treat the turn-scoped stop hook or a write-capable task delegation as a cumulative review, and never allow Codex to write production artifacts.
 
-Recursion guard: a Codex review launched by Claude must be marked as a Codex review from Claude with bounded delegation depth, and Codex must perform it directly — not delegate it back to Claude. Plugin v1.0.6 supplies no such marking; see the adapter.
+Recursion and boundary protection are layered: the wrapper's prompt forbids loading Claude-facing skill, companion, or orchestration instructions, and `--ignore-rules` prevents project `.rules` from overriding that boundary. Codex performs the review directly.
+
+## Loop-state ledger
+
+The wrapper records every round in a loop-state ledger (`--state-ledger <path>`, amendment A1): milestone, round, bound worktree, baseline, dirty-state digest, packet digest, PID, outcome, verdict, and finding ids. On any re-entry after context compaction, interruption, or restart, read the ledger first and resume from the recorded state rather than re-deriving it from memory. This is what keeps re-entry idempotent: a round already completed is not re-run, an accepted finding is not applied twice, and no duplicate reviewer is launched.
 
 ## Use specialized skills when available
 
@@ -129,7 +133,7 @@ Prepare a compact plan packet from [references/plan-packet.md](references/plan-p
 
 Use only one plan-review correction round by default. Classify Codex suggestions as `accept`, `disprove`, `defer`, or `escalate` using the same evidence rules as implementation findings. Incorporate accepted improvements, explain disproved or deferred suggestions compactly, and escalate architecture or authority decisions to the user. Then freeze milestone names, contracts, dependencies, and non-goals before editing production artifacts.
 
-Plan review uses the same model-callable review transport as milestone review; see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). Invoke it directly, classify suggestions (`accept`/`disprove`/`defer`/`escalate`), apply accepted corrections, and re-review until a valid approval or the plan-review convergence rule. Never create fake tracked changes or commits to manufacture a review target, and never treat a turn-scoped stop-gate result as a plan review.
+Plan review uses the same wrapper as milestone review; see [references/codex-cli-adapter.md](references/codex-cli-adapter.md). Invoke `scripts/run_codex_review.py review ...` with the plan packet, classify suggestions (`accept`/`disprove`/`defer`/`escalate`), apply accepted corrections, and re-review until a valid approval or the plan-review convergence rule. Never create fake tracked changes or commits to manufacture a review target, and never treat a turn-scoped stop-gate result as a plan review.
 
 ## Execute one milestone
 
@@ -144,15 +148,28 @@ For each milestone:
 7. **Inspect architecture** — review the diff and tests against the post-green checklist in [references/safety-lifecycle.md](references/safety-lifecycle.md). Remove false claims, accidental scope, duplicated mechanisms, permissive fallbacks, temporary artifacts, and unsafe shortcuts.
 8. **Reconcile evidence and docs** — update the acceptance ledger and current-state documentation with exact results, skips, limitations, and decisions.
 9. **Prepare** — create a compact review packet from [references/review-packet.md](references/review-packet.md). Validate it with `scripts/validate_review_packet.py`.
-10. **Request review** — invoke the public model-callable Codex review transport directly with the milestone scope and the validated packet as review focus; wait for the tracked result. See [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md). If autonomous supervision is unavailable and the user has approved the operator fallback, request one exact scoped command and pause instead. Never call private plugin scripts, never simulate a result, and never use the write-capable rescue/task surface as a review.
+10. **Request review** — invoke the Codex review wrapper directly with the milestone scope and the validated packet as review focus:
+
+    ```
+    python3 scripts/run_codex_review.py review \
+      --worktree <abs-implementation-root> \
+      --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
+      --milestone <id> --round <n> \
+      --packet <validated-review-packet> \
+      --schema schemas/codex-review-output.schema.json \
+      --output-dir <dir-outside-the-worktree> \
+      --state-ledger <loop-state-ledger-path>
+    ```
+
+    The wrapper binds the exact worktree, runs Codex read-only with closed stdin and a bounded timeout, validates the structured verdict, writes a target-bound receipt, and records the round in the loop-state ledger. Never call private plugin scripts, never simulate a result, and never use the write-capable rescue/task surface as a review. If preflight has not passed, stop.
 
 The packet routes the reviewer's attention; it is not proof. The reviewer must inspect the repository diff and tests independently and remain read-only.
 
-11. **Validate the verdict** — confirm the result is a completed review-class job whose `Target` matches the intended Git scope, concerns this milestone and actual affected code, carries a structured `verdict`, and is neither a turn-scoped stop-gate `ALLOW`/`BLOCK` nor a stale or unrelated job. Accept the milestone only on a scoped `verdict: approve` and then stop at the milestone boundary. On `needs-attention`, run the convergence loop in *Handle a blocked review*. On transport failure, timeout, or an invalid/stale result, record that no verdict occurred and follow *Correction limits*; never retry unchanged turns.
+11. **Validate the verdict** — read the wrapper's receipt. Accept the milestone only on `outcome: completed` with a scoped `verdict: approve`. Treat `needs-attention` as input to the convergence loop in *Handle a blocked review*. Treat any transport outcome (`process_failed`, `timed_out`, `invalid_output`, `target_changed`, `cli_missing`, `cancelled`) as no verdict: record it and follow *Correction limits*; never retry an unchanged turn. A `completed` receipt is evidence the verdict is bound to this milestone's worktree, scope, baseline, and round, because the wrapper already rejected malformed, contradictory, and target-mismatched output.
 
 ## Increase reviewer independence
 
-Claude picks the directed questions and can unintentionally constrain Codex to risks Claude already found. Every plan and milestone review therefore requires two passes, delivered as the review focus through the model-callable review transport (the turn-scoped stop gate does not consume these passes):
+Claude picks the directed questions and can unintentionally constrain Codex to risks Claude already found. Every plan and milestone review therefore requires two passes, delivered as the review focus through the wrapper (the turn-scoped stop gate does not consume these passes):
 
 - **Pass 1 — independent sweep.** The packet's independent-review mandate directs Codex to inspect the specification, diff, affected callers and flows, tests, and evidence on its own; to choose its own highest-risk attack surface; and to report material counterexamples, affected flows, or missing proof that Claude did not identify. Claude's directed questions must not constrain this pass.
 - **Pass 2 — directed challenge.** Codex then answers zero to three optional directed questions supplied by Claude. "None" is valid; do not invent questions merely to fill the section.
@@ -174,7 +191,7 @@ For each accepted finding, apply the smallest root-cause correction:
 2. add or strengthen regression evidence;
 3. rerun affected verification tiers;
 4. update the evidence ledger, documentation, and packet with the correction and exact results;
-5. invoke the review transport again directly with the updated focus (see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md)); do not retry unchanged stop/status turns or simulate a result.
+5. invoke the wrapper again with the updated packet and the next round number (see [references/codex-cli-adapter.md](references/codex-cli-adapter.md)); do not retry unchanged turns or simulate a result.
 
 Continue the correction-review loop automatically until a valid scoped `verdict: approve`. Do not stop after every review; stop only on approval or an escalation condition.
 
@@ -183,6 +200,7 @@ Continue the correction-review loop automatically until a valid scoped `verdict:
 Continue automatically through ordinary correction-review cycles. Escalate (stop and ask the user) when:
 
 - the same material defect survives two correction reviews;
+- the per-milestone **global cap** is reached: more than four total correction rounds, more than eight Codex invocations, or the configured spend ceiling. The per-defect rule above is not enough on its own, because Codex may raise a fresh material finding each round; the global cap bounds total cost and prevents unbounded convergence (amendment A2);
 - Codex invalidates the approved architecture;
 - a correction requires new product, security, migration, compatibility, or operational authority;
 - transport failure or an invalid/stale result recurs and cannot be recovered safely.
@@ -191,7 +209,7 @@ Do not escalate merely because Codex produced actionable findings in the first r
 
 ## Advance between milestones
 
-Once Codex returns a valid scoped `verdict: approve` for a milestone, stop at the milestone boundary and report the approved milestone. The stop belongs after Codex approval, not before review invocation. To continue, reread repository state, verify the accepted baseline and worktree ownership, and proceed to the next milestone without restating completed history. In operator-fallback mode (transport unavailable, user-approved), each review and re-review is one operator command; never mistake a turn-scoped stop-gate `ALLOW` for approval, and never replace the boundary with manual copying of Codex reports. See [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md).
+Once Codex returns a valid scoped `verdict: approve` for a milestone, stop at the milestone boundary and report the approved milestone. The stop belongs after Codex approval, not before review invocation. To continue, reread repository state, read the loop-state ledger, verify the accepted baseline and worktree ownership, and proceed to the next milestone without restating completed history. In operator-fallback mode (preflight failed, user-approved), each review and re-review is one operator command; never mistake a turn-scoped stop-gate `ALLOW` for approval, and never replace the boundary with manual copying of Codex reports. See [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
 
 When checkpoint commits are authorized, commit only an accepted, verified milestone and record its hash in the ledger. Never commit merely to manufacture a review target.
 
@@ -216,7 +234,7 @@ After all milestones are individually accepted:
 2. run the complete repository-required and applicable tiered verification in a hermetic environment, prioritizing the documented Docker stack when the project is Dockerized;
 3. inspect interactions across milestones, migrations, error paths, recovery, cleanup, and documentation;
 4. prepare a final packet covering only cross-milestone risks and exact final results;
-5. run the final integration review through the same autonomous convergence loop — invoke the review transport, address accepted findings, rerun verification, and re-review until a valid scoped `verdict: approve` (see [references/codex-plugin-adapter.md](references/codex-plugin-adapter.md));
+5. run the final integration review through the same autonomous convergence loop — invoke `scripts/run_codex_review.py review ...` with the final packet, address accepted findings, rerun verification, and re-review until a valid scoped `verdict: approve` (see [references/codex-cli-adapter.md](references/codex-cli-adapter.md));
 6. perform only explicitly authorized delivery actions.
 
 In the Lightweight profile, the single milestone review stands as the final integration review unless its findings expose broader risk. Do not claim completion while a material finding, required test, documentation update, cleanup obligation, or delivery action remains unresolved.
@@ -242,9 +260,14 @@ Before cleanup, inspect modified and untracked files and all isolated services o
 - Include exact commands and result summaries; omit routine exploration.
 - Carry forward only unresolved constraints and findings.
 - Keep ledger updates factual and compact; do not copy the ledger into every Codex packet.
-- Use no more than two correction reviews per milestone before escalation.
+- Use no more than two correction reviews per milestone (per-defect) before escalation, and never exceed the global cap of four rounds or eight invocations (amendment A2).
 - Use no more than one plan-review correction before freezing the plan or escalating.
 - Do not enable multiple concurrent review jobs or allow another writer in the worktree.
+- Read the loop-state ledger on every re-entry so compaction never causes a double-applied correction, a duplicate reviewer, or a lost round (amendment A1).
+
+## Boundary with Phase 4
+
+This skill (`codex-reviewed-implementation`, Phase 5) and `codex-supervise-claude` (Phase 4) are inverse-direction companions. Here Claude writes and Codex reviews via the public Codex CLI; in Phase 4 Codex supervises and Claude writes via the public Claude-delegation surface. The two keep separate transport wrappers and opposite state ownership; they share only the structured-verdict schema shape and the packet-validator discipline. Do not let the two silently diverge in finding classification or convergence rules. See [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
 
 ## Completion report
 
