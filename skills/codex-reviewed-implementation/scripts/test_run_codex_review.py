@@ -181,6 +181,14 @@ def test_build_command_model_optional():
     assert with_model[with_model.index("-m") + 1] == "gpt-5"
 
 
+def test_build_command_uses_resolved_codex_path():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o",
+        codex_path="/opt/codex/bin/codex",
+    )
+    assert cmd[0] == "/opt/codex/bin/codex"
+
+
 def test_scope_contract_preserves_packet_and_exact_target():
     fingerprint = "a" * 64
     resolved = {"baseline": "headsha", "head": "headsha"}
@@ -670,6 +678,254 @@ def test_preflight_auth_missing(tmp_path):
     )
     assert not ok
     assert any("authentication" in f for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: review-phase validation, observation wiring, process-group backport
+# ---------------------------------------------------------------------------
+
+class FakeQuotaObserver:
+    """Records before/after/record calls; stand-in for the real QuotaObserver."""
+
+    def __init__(self, before_snap=None, after_snap=None, *, record_raises=False):
+        self.before_snap = before_snap
+        self.after_snap = after_snap
+        self.record_raises = record_raises
+        self.before_calls = 0
+        self.after_calls = 0
+        self.records: list[tuple] = []
+
+    def before(self):
+        self.before_calls += 1
+        return self.before_snap
+
+    def after(self):
+        self.after_calls += 1
+        return self.after_snap
+
+    def record(self, meta, before, after):
+        if self.record_raises:
+            raise RuntimeError("boom")
+        self.records.append((meta, before, after))
+
+
+def _ok_snapshot(used=42):
+    return {"status": "ok", "account_pseudonym": "acct1",
+            "candidates": [{"candidate_id": "C1", "window_role": "primary",
+                            "window_duration_mins": 10080, "resets_at": 1000,
+                            "used_percent": used}], "diagnostic": ""}
+
+
+def test_validate_review_phase_combinations():
+    assert rcr.validate_review_phase("plan_challenge", "plan") == []
+    assert rcr.validate_review_phase("milestone", "milestone") == []
+    assert rcr.validate_review_phase("correction", "milestone") == []
+    assert rcr.validate_review_phase("final", "milestone") == []
+    assert rcr.validate_review_phase("doctor", None) == []
+    assert rcr.validate_review_phase("plan_challenge", "milestone")  # mismatch -> errors
+    assert rcr.validate_review_phase("milestone", "plan")
+    assert rcr.validate_review_phase("bogus", "milestone")
+
+
+def test_run_review_records_before_after_without_changing_outcome(tmp_path):
+    wt = tmp_path / "wt"
+    obs = FakeQuotaObserver(before_snap=_ok_snapshot(40), after_snap=_ok_snapshot(48))
+    res, *_ = _run(tmp_path, verdict=base_verdict(str(wt)))
+    # Re-run with observer injected (the helper doesn't pass it, so call directly).
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(tmp_path / "packet.md"), schema_path=str(tmp_path / "schema.json"),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt))),
+        review_phase="milestone", quota_observer=obs,
+    )
+    assert res.outcome == "completed"  # unchanged
+    assert res.verdict["verdict"] == "approve"
+    assert obs.before_calls == 1 and obs.after_calls == 1
+    assert len(obs.records) == 1
+    meta, before, after = obs.records[0]
+    assert meta["review_phase"] == "milestone"
+    assert meta["outcome"] == "completed"
+    assert before["candidates"][0]["used_percent"] == 40
+    assert after["candidates"][0]["used_percent"] == 48
+    assert "invocation_id" in meta and meta["invocation_id"]
+
+
+def test_observation_never_alters_outcome_when_snapshots_fail(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    obs = FakeQuotaObserver(before_snap=None, after_snap=None, record_raises=True)
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt))),
+        review_phase="milestone", quota_observer=obs,
+    )
+    # record() raised, but the review outcome is still the real completed verdict.
+    assert res.outcome == "completed"
+    assert res.verdict["verdict"] == "approve"
+
+
+def test_observation_covers_failure_and_timeout(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    obs = FakeQuotaObserver()
+    rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=FakeRunner(worktree=str(wt), verdict="missing", review_returncode=2),
+        review_phase="milestone", quota_observer=obs,
+    )
+    assert obs.after_calls == 1  # after-snapshot captured even on process failure
+    assert obs.records[0][0]["outcome"] == "process_failed"
+
+
+def test_observation_after_runs_when_review_spawn_raises_oserror(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    obs = FakeQuotaObserver()
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)))
+
+    def raising_runner(cmd, **kwargs):
+        if "exec" in cmd:
+            raise PermissionError("cannot execute")
+        return fake(cmd, **kwargs)
+
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=raising_runner, review_phase="milestone", quota_observer=obs,
+    )
+    assert res.outcome == "process_failed"
+    assert obs.after_calls == 1
+    assert obs.records[0][0]["outcome"] == "process_failed"
+
+
+def test_replay_short_circuits_observation(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    ledger = tmp_path / "ledger.json"
+    obs = FakeQuotaObserver()
+    # First run records the completed round (no observer, for a clean ledger).
+    rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), runner=FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt))),
+    )
+    # Replay with an observer present: no quota reads should happen.
+    rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), runner=FakeRunner(worktree=str(wt), verdict="missing"),
+        review_phase="milestone", quota_observer=obs,
+    )
+    assert obs.before_calls == 0 and obs.after_calls == 0
+    assert obs.records == []
+
+
+def test_receipt_carries_non_authoritative_observation_summary(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    obs = FakeQuotaObserver(before_snap=_ok_snapshot(40), after_snap=_ok_snapshot(48))
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt))),
+        review_phase="milestone", quota_observer=obs,
+    )
+    assert res.receipt["observation"]["non_authoritative"] is True
+    assert res.receipt["observation"]["before_status"] == "ok"
+    assert res.receipt["observation"]["after_status"] == "ok"
+    # raw candidate data is NOT embedded in the receipt
+    assert "candidate_limits" not in res.receipt["observation"]
+
+
+def test_production_execution_path_uses_run_one_shot(monkeypatch, tmp_path):
+    """When no runner is injected, the review subprocess goes through run_one_shot
+    (process-group-aware). Injected runners keep their existing semantics."""
+    import codex_process
+
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "init", str(wt)], capture_output=True)
+    (wt / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", str(wt), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-m", "init"], capture_output=True)
+    out = tmp_path / "out"; out.mkdir()
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+
+    seen = {}
+
+    def fake_run_one_shot(cmd, *, timeout, **kw):
+        seen["called"] = list(cmd)
+        out_path = cmd[cmd.index("-o") + 1]
+        prompt = cmd[-1]
+        rendered = json.loads(json.dumps(base_verdict(str(wt))))
+        m = re.search(r"^target_ref: ([a-f0-9]{64})$", prompt, re.M)
+        b = re.search(r"^baseline: (\S+)$", prompt, re.M)
+        if m:
+            rendered["target"]["target_ref"] = m.group(1)
+        if b:
+            rendered["target"]["baseline"] = b.group(1)
+        Path(out_path).write_text(json.dumps(rendered))
+        return subprocess.CompletedProcess(args=list(cmd), returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(codex_process, "run_one_shot", fake_run_one_shot)
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema), output_dir=str(out),
+        milestone="m1", round_no=1, runner=None,
+    )
+    assert seen.get("called"), "run_one_shot was not used on the production path"
+    assert res.outcome == "completed"
+
+
+def test_injected_runner_path_unchanged_by_backport(tmp_path):
+    """An injected runner is still called with the same kwargs as before."""
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)))
+    rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1, runner=fake,
+    )
+    review_call = next(c for c in fake.calls if c[0] == "codex" and "exec" in c)
+    assert review_call[0] == "codex"  # injected runner path preserved
+
+
+def test_doctor_instruments_doctor_phase(tmp_path):
+    """run_doctor records a review_phase=doctor observation without altering its result."""
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    receipt = tmp_path / "doctor.json"
+    obs = FakeQuotaObserver(before_snap=_ok_snapshot(10), after_snap=_ok_snapshot(12))
+    passed, doctor_receipt = rcr.run_doctor(
+        worktree=str(wt), schema_path=str(schema), receipt_path=str(receipt),
+        runner=FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt))),
+        quota_observer=obs,
+    )
+    # observation recorded as a doctor-phase interval (outcome null for doctor)
+    assert len(obs.records) == 1
+    meta = obs.records[0][0]
+    assert meta["review_phase"] == "doctor"
+    assert meta["review_kind"] is None
+    assert meta["outcome"] is None
+    # the doctor result itself is unaffected by observation
+    assert isinstance(passed, bool)
+    assert doctor_receipt["outcome"] in ("passed", "failed")
 
 
 if __name__ == "__main__":

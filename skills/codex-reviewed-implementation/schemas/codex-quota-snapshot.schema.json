@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skills.local/codex-reviewed-implementation/codex-quota-snapshot.schema.json",
+  "title": "Codex quota observation record",
+  "description": "One non-authoritative, pseudonymized quota observation appended per review/doctor invocation (Phase 6, observation-only). This is metadata attached to a review: it can never gate, block, cancel, retry, or reorder a review, and missing/ambiguous/incompatible data must never change a review outcome. Only normalized observational fields are persisted; raw account identifiers, plan, tokens, headers, and endpoint credentials are never stored.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "review_phase",
+    "snapshot_status_before",
+    "snapshot_status_after",
+    "candidate_limits",
+    "account_pseudonym"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique id linking this log record to the before/after snapshots, the Phase 5 receipt, and the ledger round."
+    },
+    "transport_version": {
+      "type": "integer"
+    },
+    "schema_digest": {
+      "type": ["string", "null"]
+    },
+    "doctor_receipt_digest": {
+      "type": ["string", "null"]
+    },
+    "codex_path": {
+      "type": ["string", "null"]
+    },
+    "codex_version": {
+      "type": ["string", "null"]
+    },
+    "model": {
+      "type": ["string", "null"]
+    },
+    "review_kind": {
+      "type": ["string", "null"],
+      "enum": ["plan", "milestone", null],
+      "description": "The Phase 5 verdict review_kind; null for doctor."
+    },
+    "review_phase": {
+      "type": "string",
+      "enum": ["plan_challenge", "milestone", "correction", "final", "doctor"],
+      "description": "Receipt/observation metadata only. Never sent as a new verdict kind."
+    },
+    "milestone": {
+      "type": ["string", "null"]
+    },
+    "round": {
+      "type": ["integer", "null"]
+    },
+    "started_at": {
+      "type": ["string", "null"]
+    },
+    "finished_at": {
+      "type": ["string", "null"]
+    },
+    "duration_s": {
+      "type": ["number", "null"]
+    },
+    "outcome": {
+      "type": ["string", "null"],
+      "description": "Phase 5 review outcome; null for doctor."
+    },
+    "verdict": {
+      "type": ["string", "null"],
+      "enum": ["approve", "needs-attention", null]
+    },
+    "account_pseudonym": {
+      "type": ["string", "null"],
+      "description": "Salted SHA-256 digest of a server-returned account identity, or null in degraded mode. Never a raw identifier."
+    },
+    "snapshot_status_before": {
+      "type": "string",
+      "enum": ["ok", "unavailable", "incompatible", "ambiguous", "error", "none"]
+    },
+    "snapshot_status_after": {
+      "type": "string",
+      "enum": ["ok", "unavailable", "incompatible", "ambiguous", "error", "none"]
+    },
+    "snapshot_diagnostic_before": {
+      "type": ["string", "null"]
+    },
+    "snapshot_diagnostic_after": {
+      "type": ["string", "null"]
+    },
+    "candidate_limits": {
+      "type": "array",
+      "description": "Every observed candidate window, normalized without choosing a 'weekly' limit (the windowDurationMins==10080 heuristic is forbidden). Each delta is interval correlation, not attributed review consumption.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidate_id",
+          "window_role",
+          "window_duration_mins",
+          "used_percent_before",
+          "used_percent_after",
+          "resets_at_before",
+          "resets_at_after",
+          "observed_account_delta_during_interval"
+        ],
+        "properties": {
+          "candidate_id": {
+            "type": ["string", "null"],
+            "description": "Pseudonymized stable id for matching across snapshots; null in degraded/no-salt mode."
+          },
+          "window_role": {
+            "type": ["string", "null"],
+            "enum": ["primary", "secondary", null]
+          },
+          "window_duration_mins": {
+            "type": ["integer", "null"]
+          },
+          "used_percent_before": {
+            "type": ["integer", "null"]
+          },
+          "used_percent_after": {
+            "type": ["integer", "null"]
+          },
+          "resets_at_before": {
+            "type": ["integer", "null"]
+          },
+          "resets_at_after": {
+            "type": ["integer", "null"]
+          },
+          "observed_account_delta_during_interval": {
+            "type": ["integer", "null"],
+            "description": "after.used_percent - before.used_percent for the same candidate/window, or null when either snapshot is absent/ambiguous, the account pseudonym or candidate identity differs, the window changed or reset, or the counter decreased unexpectedly."
+          }
+        }
+      }
+    }
+  }
+}

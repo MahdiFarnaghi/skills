@@ -43,10 +43,19 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+# Phase 6 sibling modules (observation-only quota instrumentation). These live
+# beside this script; ensure the script directory is importable in all run modes.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import codex_process  # noqa: E402
+import quota_observation as qo  # noqa: E402
+import read_codex_quota as rcq  # noqa: E402
+import summarize_quota_observations as sq  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants and the closed failure enum
@@ -60,6 +69,60 @@ SCHEMA_VERSION = 2
 VALID_REVIEW_KINDS = ("plan", "milestone")
 BLOCKING_SEVERITIES = ("critical", "high")
 MAX_PACKET_BYTES = 8_000  # mirrors validate_review_packet.py
+
+# Phase 6 — observation-only quota instrumentation defaults.
+DEFAULT_QUOTA_TIMEOUT_SECONDS = 5.0
+VALID_REVIEW_PHASES = ("plan_challenge", "milestone", "correction", "final", "doctor")
+_REVIEW_PHASE_KIND_RULES = {
+    "plan_challenge": {"plan"},
+    "milestone": {"milestone"},
+    "correction": {"milestone"},
+    "final": {"milestone"},
+    "doctor": {None},
+}
+
+
+def validate_review_phase(review_phase: str, review_kind: str | None) -> list[str]:
+    """Validate the ``--review-phase`` / ``review_kind`` combination.
+
+    ``plan_challenge`` requires ``plan``; ``milestone``/``correction``/``final``
+    require ``milestone``; ``doctor`` carries no review kind. Returns a list of
+    error strings (empty means valid). The phase is receipt/observation metadata
+    only and is never sent as a new verdict kind.
+    """
+    errors: list[str] = []
+    if review_phase not in VALID_REVIEW_PHASES:
+        errors.append(
+            f"--review-phase must be one of {VALID_REVIEW_PHASES}, got {review_phase!r}"
+        )
+        return errors
+    allowed = _REVIEW_PHASE_KIND_RULES[review_phase]
+    if review_kind not in allowed:
+        errors.append(
+            f"--review-phase {review_phase!r} requires review_kind "
+            f"{sorted(k or 'null' for k in allowed)}, got {review_kind!r}"
+        )
+    return errors
+
+
+def _execute_review_subprocess(
+    cmd: Sequence[str], *, timeout: float, runner: Runner | None
+) -> subprocess.CompletedProcess:
+    """Run the Codex subprocess, process-group-aware on the production path.
+
+    When the default runner is in effect (``subprocess.run``), execution goes
+    through :func:`codex_process.run_one_shot`, which terminates and reaps the
+    whole process group on timeout (no orphans) and then raises
+    ``subprocess.TimeoutExpired`` carrying partial output — so the existing
+    ``except`` handlers work unchanged. An injected ``runner`` (tests) is called
+    with the same kwargs as before.
+    """
+    if runner is None or runner is subprocess.run:
+        return codex_process.run_one_shot(list(cmd), timeout=timeout)
+    return runner(
+        list(cmd), capture_output=True, text=True, timeout=timeout,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
 
 # Distinct exit codes. 0 means a valid verdict was obtained (read the receipt
 # for approve vs needs-attention). Every unexpected condition defaults to a
@@ -176,11 +239,12 @@ def build_command(
     schema_path: str,
     out_path: str,
     model: str | None = None,
+    codex_path: str = "codex",
     exec_flags: Sequence[str] = ("--ephemeral", "--ignore-rules"),
 ) -> list[str]:
     """Build the plain structured ``codex exec`` argument vector."""
     cmd: list[str] = [
-        "codex",
+        codex_path,
         "exec",
         "-C",
         worktree,
@@ -973,13 +1037,13 @@ def doctor_key(codex_version: str, model: str | None = None) -> dict[str, Any]:
 
 def verify_doctor_receipt(
     path: str, *, schema_path: str | None = None, model: str | None = None,
-    runner: Runner | None = None
+    runner: Runner | None = None, codex_path: str = "codex",
 ) -> list[str]:
     try:
         receipt = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [f"doctor receipt is unreadable: {exc}"]
-    expected = doctor_key(_codex_version(runner=runner), model)
+    expected = doctor_key(_codex_version(codex_path, runner=runner), model)
     if schema_path:
         expected["schema_digest"] = file_digest(schema_path)
     errors = [f"doctor receipt mismatch: {key}" for key, value in expected.items() if receipt.get(key) != value]
@@ -991,6 +1055,8 @@ def verify_doctor_receipt(
 def run_doctor(
     *, worktree: str, schema_path: str, receipt_path: str, timeout: float = 180.0,
     model: str | None = None, runner: Runner | None = None,
+    quota_observer: Any = None,
+    codex_path: str = "codex",
 ) -> tuple[bool, dict[str, Any]]:
     """Perform the explicit paid structured-output/read-only transport check."""
     runner = runner or subprocess.run
@@ -998,11 +1064,14 @@ def run_doctor(
     identity = git_identity(worktree, runner=runner)
     resolved = {"baseline": identity["head"], "head": identity["head"]}
     before = target_fingerprint(worktree, identity, scope="uncommitted", resolved=resolved, runner=runner)
+    doctor_invocation_id = uuid.uuid4().hex
+    doctor_before_snapshot = quota_observer.before() if quota_observer else None
     with tempfile.TemporaryDirectory(prefix="codex-review-doctor-") as temp_dir:
         output_path = os.path.join(temp_dir, "doctor-output.json")
         doctor_ref = "d" * 64
         cmd = build_command(
             worktree=worktree, schema_path=schema_path, out_path=output_path, model=model,
+            codex_path=codex_path,
         )
         prompt = (
             "Transport doctor only. Do not edit files or run commands. Return a schema-valid "
@@ -1012,10 +1081,7 @@ def run_doctor(
             "and next_steps='none'."
         )
         try:
-            cp = runner(
-                [*cmd, prompt], capture_output=True, text=True, timeout=timeout,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-            )
+            cp = _execute_review_subprocess([*cmd, prompt], timeout=timeout, runner=runner)
             parsed = json.loads(Path(output_path).read_text(encoding="utf-8")) if os.path.isfile(output_path) else None
             validation = validate_verdict(
                 parsed, expected_review_kind="milestone", expected_worktree=worktree,
@@ -1035,7 +1101,7 @@ def run_doctor(
     after = target_fingerprint(worktree, post_identity, scope="uncommitted", resolved=resolved, runner=runner)
     passed = process_ok and before == after
     receipt = {
-        **doctor_key(_codex_version(runner=runner), model),
+        **doctor_key(_codex_version(codex_path, runner=runner), model),
         "schema_digest": file_digest(schema_path),
         "outcome": "passed" if passed else "failed",
         "checked_at": utc_now(),
@@ -1046,7 +1112,95 @@ def run_doctor(
     }
     Path(receipt_path).parent.mkdir(parents=True, exist_ok=True)
     write_atomic(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+
+    # Phase 6: instrument the doctor as review_phase=doctor so its usage is not
+    # omitted. Observation metadata only; never alters the doctor result.
+    if quota_observer:
+        doctor_after_snapshot = quota_observer.after()
+        try:
+            quota_observer.record(
+                {
+                    "invocation_id": doctor_invocation_id,
+                    "transport_version": TRANSPORT_VERSION,
+                    "schema_digest": file_digest(schema_path) if os.path.isfile(schema_path) else None,
+                    "doctor_receipt_digest": file_digest(receipt_path),
+                    "codex_path": codex_path,
+                    "codex_version": receipt.get("codex_version"),
+                    "model": model,
+                    "review_kind": None,
+                    "review_phase": "doctor",
+                    "milestone": None,
+                    "round": None,
+                    "outcome": None,
+                    "verdict": None,
+                },
+                doctor_before_snapshot,
+                doctor_after_snapshot,
+            )
+        except Exception:
+            pass
     return passed, receipt
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — observation-only quota capture around a review
+# ---------------------------------------------------------------------------
+
+class QuotaObserver:
+    """Bounded, fail-soft before/after quota capture + record append.
+
+    ``before``/``after`` perform one bounded quota read each (default 5s, max 15s)
+    and never raise. ``record`` builds the pseudonymized observation record,
+    appends it to the JSONL store, and runs the idempotent eligibility-gated
+    report generator. Nothing here may gate, block, or alter a review.
+    """
+
+    def __init__(
+        self,
+        *,
+        codex_path: str,
+        codex_home: str | None = None,
+        model: str | None = None,
+        log_path: str,
+        timeout: float = DEFAULT_QUOTA_TIMEOUT_SECONDS,
+        capture_fn: Callable[[], dict] | None = None,
+    ):
+        self._codex_path = codex_path
+        self._codex_home = codex_home
+        self._model = model
+        self._log_path = log_path
+        self._timeout = timeout
+        self._capture_fn = capture_fn
+
+    def _capture(self) -> dict:
+        if self._capture_fn is not None:
+            return self._capture_fn()
+        salt = qo.ensure_salt(self._log_path)
+        return rcq.capture_snapshot(
+            codex_path=self._codex_path, codex_home=self._codex_home,
+            model=self._model, salt=salt, timeout=self._timeout,
+        )
+
+    def before(self) -> dict | None:
+        try:
+            return self._capture()
+        except Exception:
+            return None
+
+    def after(self) -> dict | None:
+        try:
+            return self._capture()
+        except Exception:
+            return None
+
+    def record(self, meta: dict, before_snapshot: dict | None, after_snapshot: dict | None) -> dict:
+        record = qo.build_observation_record(meta, before_snapshot, after_snapshot)
+        qo.append_observation(self._log_path, record)
+        try:
+            sq.summarize(self._log_path)
+        except Exception:
+            pass
+        return record
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1225,9 @@ def run_review(
     runner: Runner | None = None,
     now: Callable[[], str] = utc_now,
     doctor_receipt: str | None = None,
+    review_phase: str = "milestone",
+    quota_observer: Any = None,
+    codex_path: str = "codex",
 ) -> ReviewResult:
     """Execute one bounded review and return a classified result + receipt.
 
@@ -1080,7 +1237,8 @@ def run_review(
     runner = runner or subprocess.run
     if doctor_receipt:
         doctor_errors = verify_doctor_receipt(
-            doctor_receipt, schema_path=schema_path, model=model, runner=runner
+            doctor_receipt, schema_path=schema_path, model=model, runner=runner,
+            codex_path=codex_path,
         )
         if doctor_errors:
             return ReviewResult(outcome="doctor_required", diagnostics="; ".join(doctor_errors))
@@ -1127,13 +1285,19 @@ def run_review(
             "packet_digest": packet_digest,
         }, now=now)
         if replay is not None:
-            return replay
+            return replay  # replay short-circuit: no quota reads (Phase 6)
+
+    # Phase 6: attempt the bounded before-snapshot for a newly claimed round.
+    # Quota data is metadata only and can never alter the review below.
+    invocation_id = uuid.uuid4().hex
+    before_snapshot = quota_observer.before() if quota_observer else None
 
     cmd = build_command(
         worktree=worktree_abs,
         schema_path=os.path.abspath(schema_path),
         out_path=os.path.abspath(out_path),
         model=model,
+        codex_path=codex_path,
     )
     contract = (
         plan_contract(baseline, fingerprint_pre, plan_paths)
@@ -1161,16 +1325,11 @@ def run_review(
     cli_present = True
     stdout_text = ""
     stderr_text = ""
+    process_error = ""
+    after_snapshot = None
 
     try:
-        cp = runner(
-            cmd_with_prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        cp = _execute_review_subprocess(cmd_with_prompt, timeout=timeout, runner=runner)
         returncode = cp.returncode
         stdout_text = cp.stdout or ""
         stderr_text = cp.stderr or ""
@@ -1182,6 +1341,14 @@ def run_review(
         stderr_text = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
     except KeyboardInterrupt:
         cancelled = True
+    except OSError as exc:
+        process_error = str(exc)
+        stderr_text = str(exc)
+    finally:
+        # Measure the process interval even when launch/communication fails.
+        # QuotaObserver.after() is fail-soft and cannot replace the transport
+        # exception or outcome.
+        after_snapshot = quota_observer.after() if quota_observer else None
     finished = now()
     duration = time.monotonic() - t0
 
@@ -1199,14 +1366,14 @@ def run_review(
     codex_version = ""
     try:
         vcp = runner(
-            ["codex", "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [codex_path, "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL
         )
         codex_version = ((vcp.stdout or "") + (vcp.stderr or "")).strip().splitlines()[0]
     except Exception:
         pass
 
     verdict: dict[str, Any] | None = None
-    diagnostics = ""
+    diagnostics = process_error
     receipt: dict[str, Any] = {
         "outcome": outcome,
         "verdict": None,
@@ -1297,7 +1464,44 @@ def run_review(
     if os.path.isfile(out_path):
         receipt["artifacts"]["verdict_digest"] = file_digest(out_path)
 
+    # Phase 6: capture the bounded after-snapshot and attach a NON-authoritative
+    # observation summary to the receipt. Raw candidate data is never embedded;
+    # the full pseudonymized record lives only in the JSONL store.
+    if quota_observer:
+        receipt["observation"] = {
+            "non_authoritative": True,
+            "invocation_id": invocation_id,
+            "before_status": before_snapshot.get("status") if before_snapshot else "none",
+            "after_status": after_snapshot.get("status") if after_snapshot else "none",
+        }
+
     write_atomic(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+
+    if quota_observer:
+        meta = {
+            "invocation_id": invocation_id,
+            "transport_version": TRANSPORT_VERSION,
+            "schema_digest": file_digest(os.path.abspath(schema_path))
+            if os.path.isfile(schema_path) else None,
+            "doctor_receipt_digest": file_digest(doctor_receipt)
+            if doctor_receipt and os.path.isfile(doctor_receipt) else None,
+            "codex_path": codex_path,
+            "codex_version": codex_version or None,
+            "model": model,
+            "review_kind": review_kind,
+            "review_phase": review_phase,
+            "milestone": milestone,
+            "round": round_no,
+            "started_at": started,
+            "finished_at": finished,
+            "duration_s": round(duration, 3),
+            "outcome": outcome,
+            "verdict": verdict.get("verdict") if verdict else None,
+        }
+        try:
+            quota_observer.record(meta, before_snapshot, after_snapshot)
+        except Exception:
+            pass  # observation never alters the review outcome
 
     if state_ledger:
         update_state_ledger(state_ledger, ledger_key, {
@@ -1341,10 +1545,39 @@ def _emit(result: ReviewResult) -> int:
     return code
 
 
+def _build_observer(args: argparse.Namespace) -> QuotaObserver | None:
+    """Build a QuotaObserver from CLI args, or None when observation is off.
+
+    Resolves the Codex executable once to an absolute path (Phase 6 constraint 6)
+    and reuses the caller's CODEX_HOME/model so the reader hits the same account
+    and endpoint as the reviewer. The observation log path is validated to live
+    outside the reviewed worktree, like other receipts.
+    """
+    log_path = getattr(args, "quota_observations", None)
+    if not log_path:
+        return None
+    worktree = getattr(args, "worktree", None)
+    if worktree:
+        wt = os.path.abspath(worktree).rstrip(os.sep)
+        if os.path.abspath(log_path) == wt or os.path.abspath(log_path).startswith(wt + os.sep):
+            print(
+                "ERROR: --quota-observations must be outside the reviewed worktree",
+                file=sys.stderr,
+            )
+            return None
+    codex_path = getattr(args, "codex_path", None) or shutil.which("codex") or "codex"
+    codex_home = os.environ.get("CODEX_HOME")
+    return QuotaObserver(
+        codex_path=codex_path, codex_home=codex_home, model=args.model,
+        log_path=log_path, timeout=getattr(args, "quota_timeout", DEFAULT_QUOTA_TIMEOUT_SECONDS),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_codex_review.py",
-        description="Deterministic Codex review transport (Phase 5).",
+        description="Deterministic Codex review transport (Phase 5) "
+        "with Phase 6 observation-only quota instrumentation.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1358,9 +1591,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     dr.add_argument("--receipt", required=True, help="doctor receipt/cache path")
     dr.add_argument("--timeout", type=float, default=180.0)
     dr.add_argument("--model", default=DEFAULT_MODEL)
+    dr.add_argument("--quota-observations",
+                    help="Phase 6 (optional): quota observation JSONL log path outside the worktree")
+    dr.add_argument("--quota-timeout", type=float, default=DEFAULT_QUOTA_TIMEOUT_SECONDS,
+                    help="per-read quota timeout (default 5s, hard max 15s)")
 
     rv = sub.add_parser("review", help="run one bounded, worktree-bound read-only review")
     rv.add_argument("--review-kind", required=True, choices=VALID_REVIEW_KINDS)
+    rv.add_argument("--review-phase", required=True,
+                    choices=("plan_challenge", "milestone", "correction", "final"),
+                    help="Phase 6 receipt/observation metadata (never a verdict kind)")
     rv.add_argument("--worktree", required=True, help="absolute path to the implementation worktree")
     rv.add_argument("--scope", required=True, choices=VALID_SCOPES)
     rv.add_argument("--base", help="baseline branch (scope=base)")
@@ -1374,11 +1614,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     rv.add_argument("--model", default=DEFAULT_MODEL)
     rv.add_argument("--state-ledger", help="path to the resumable loop-state ledger (A1)")
     rv.add_argument("--doctor-receipt", required=True, help="matching successful live-doctor receipt")
+    rv.add_argument("--quota-observations",
+                    help="Phase 6 (optional): quota observation JSONL log path outside the worktree")
+    rv.add_argument("--quota-timeout", type=float, default=DEFAULT_QUOTA_TIMEOUT_SECONDS,
+                    help="per-read quota timeout (default 5s, hard max 15s)")
 
     args = parser.parse_args(argv)
+    resolved_codex = shutil.which("codex") or "codex"
+    args.codex_path = os.path.abspath(resolved_codex) if os.path.sep in resolved_codex else resolved_codex
 
     if args.command == "preflight":
-        ok, failures = preflight(worktree=args.worktree, schema_path=args.schema)
+        ok, failures = preflight(
+            codex_path=args.codex_path, worktree=args.worktree,
+            schema_path=args.schema,
+        )
         if ok:
             print("preflight: OK")
             return 0
@@ -1388,9 +1637,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EX_PREFLIGHT_FAILED
 
     if args.command == "doctor":
+        observer = _build_observer(args)
         passed, receipt = run_doctor(
             worktree=args.worktree, schema_path=args.schema, receipt_path=args.receipt,
-            timeout=args.timeout, model=args.model,
+            timeout=args.timeout, model=args.model, quota_observer=observer,
+            codex_path=args.codex_path,
         )
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return EX_OK if passed else EX_PREFLIGHT_FAILED
@@ -1410,8 +1661,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"ERROR: {err}", file=sys.stderr)
         return EX_INPUT_INVALID
 
+    phase_errors = validate_review_phase(args.review_phase, args.review_kind)
+    if phase_errors:
+        for err in phase_errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return EX_INPUT_INVALID
+
     doctor_errors = verify_doctor_receipt(
-        args.doctor_receipt, schema_path=args.schema, model=args.model
+        args.doctor_receipt, schema_path=args.schema, model=args.model,
+        codex_path=args.codex_path,
     )
     if doctor_errors:
         return _emit(ReviewResult(
@@ -1434,6 +1692,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             state_ledger=args.state_ledger,
             doctor_receipt=args.doctor_receipt,
+            review_phase=args.review_phase,
+            quota_observer=_build_observer(args),
+            codex_path=args.codex_path,
         )
     except RuntimeError as exc:
         outcome = "git_identity_failed" if any(
