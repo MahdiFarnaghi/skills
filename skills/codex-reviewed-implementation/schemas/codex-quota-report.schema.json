@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skills.local/codex-reviewed-implementation/codex-quota-report.schema.json",
+  "title": "Codex quota observation report",
+  "description": "Aggregated, non-authoritative evidence report generated once the observation window is satisfied (Phase 6). Its terminal workflow status is always decision_required: it is evidence for a separate product decision, never authorization to modify runtime policy. It may recommend no_action_warranted / continue_observation / consider_advisory, but it must never enable a warning, change thresholds, or alter review behavior without a separate user decision and implementation change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "recommendation",
+    "eligibility",
+    "coverage",
+    "snapshot_status_counts",
+    "used_percent",
+    "delta_correlation",
+    "input_record_count",
+    "records_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "store_id": {
+      "type": ["string", "null"]
+    },
+    "generated_at": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "type": "string",
+      "const": "decision_required"
+    },
+    "eligibility": {
+      "type": "object",
+      "required": ["eligible", "days_spanned", "interval_count", "review_kinds", "unmet"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "days_spanned": { "type": "number" },
+        "interval_count": { "type": "integer" },
+        "review_kinds": { "type": "array", "items": { "type": "string" } },
+        "unmet": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["no_action_warranted", "continue_observation", "consider_advisory"]
+    },
+    "recommendation_detail": {
+      "type": "object",
+      "properties": {
+        "rule": { "type": "string" },
+        "rule_version": { "type": "integer" },
+        "thresholds": {
+          "type": "object",
+          "properties": {
+            "high": { "type": "integer" },
+            "low": { "type": "integer" }
+          }
+        },
+        "per_candidate": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_id": { "type": "string" },
+              "valid_intervals": { "type": "integer" },
+              "intervals_at_high": { "type": "integer" },
+              "intervals_at_low": { "type": "integer" },
+              "low_fraction": { "type": "number" },
+              "triggered_advisory": { "type": "boolean" },
+              "supporting_interval_ids": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "by_review_kind": { "type": "object" },
+        "by_review_phase": { "type": "object" },
+        "by_model": { "type": "object" },
+        "by_outcome": { "type": "object" },
+        "days_observed": { "type": "integer" }
+      }
+    },
+    "snapshot_status_counts": {
+      "type": "object",
+      "description": "Counts of valid/unavailable/incompatible/ambiguous/error/none snapshot statuses across before+after, plus corrupt records counted and skipped.",
+      "properties": {
+        "ok": { "type": "integer" },
+        "unavailable": { "type": "integer" },
+        "incompatible": { "type": "integer" },
+        "ambiguous": { "type": "integer" },
+        "error": { "type": "integer" },
+        "none": { "type": "integer" },
+        "corrupt": { "type": "integer" }
+      }
+    },
+    "used_percent": {
+      "type": "object",
+      "description": "usedPercent distributions, maxima, and counts at or above 60% and 70%.",
+      "properties": {
+        "samples": { "type": "integer" },
+        "max": { "type": ["integer", "null"] },
+        "count_ge_60": { "type": "integer" },
+        "count_ge_70": { "type": "integer" }
+      }
+    },
+    "delta_correlation": {
+      "type": "object",
+      "description": "Per-candidate delta correlation (NOT attributed usage): totals, non-null counts, and the proportion of null deltas.",
+      "properties": {
+        "interpretation": { "type": "string" },
+        "total": { "type": "integer" },
+        "non_null": { "type": "integer" },
+        "null": { "type": "integer" },
+        "null_fraction": { "type": ["number", "null"] }
+      }
+    },
+    "time_range": {
+      "type": "object",
+      "properties": {
+        "start": { "type": ["string", "null"] },
+        "end": { "type": ["string", "null"] }
+      }
+    },
+    "input_record_count": { "type": "integer" },
+    "corrupt_record_count": { "type": "integer" },
+    "records_digest": {
+      "type": "string",
+      "description": "Stable digest of the processed record set; regeneration with the same digest is a no-op."
+    }
+  }
+}

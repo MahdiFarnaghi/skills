@@ -45,6 +45,10 @@ Recursion and boundary protection are layered: the wrapper's prompt forbids load
 
 The wrapper records every round in a loop-state ledger (`--state-ledger <path>`, amendment A1): milestone, round, bound worktree, baseline, dirty-state digest, packet digest, PID, outcome, verdict, and finding ids. On any re-entry after context compaction, interruption, or restart, read the ledger first and resume from the recorded state rather than re-deriving it from memory. This is what keeps re-entry idempotent: a round already completed is not re-run, an accepted finding is not applied twice, and no duplicate reviewer is launched.
 
+## Quota observation (Phase 6, observation-only)
+
+The transport can optionally record pseudonymized before/after Codex quota snapshots around each review and doctor invocation, purely for observation. This is metadata only: quota data can never gate, block, cancel, retry, or reorder a review, and missing/ambiguous/incompatible data never changes a review outcome. Enable it with `--quota-observations <path-outside-the-worktree>` (and optionally `--quota-timeout`, default 5s, hard max 15s). After an observation window of at least 28 days and 30 intervals, the transport automatically produces one idempotent, non-authoritative evidence report (`decision_required`) recommending `no_action_warranted`, `continue_observation`, or `consider_advisory`. The report never enables a warning or alters review behavior without a separate decision. See [references/codex-quota-observations.md](references/codex-quota-observations.md).
+
 ## Use specialized skills when available
 
 Inspect the active skill catalog rather than assuming a skill path or installation.
@@ -153,6 +157,7 @@ For each milestone:
     ```
     python3 scripts/run_codex_review.py review \
       --review-kind milestone \
+      --review-phase milestone|plan_challenge|correction|final \
       --worktree <abs-implementation-root> \
       --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
       --milestone <id> --round <n> \
@@ -161,8 +166,15 @@ For each milestone:
       [--model <same-model-certified-by-doctor>] \
       --output-dir <dir-outside-the-worktree> \
       --state-ledger <loop-state-ledger-path> \
-      --doctor-receipt <matching-doctor-receipt>
+      --doctor-receipt <matching-doctor-receipt> \
+      [--quota-observations <dir-outside-the-worktree>/quota-observations.jsonl>]
     ```
+
+    `--review-phase` is receipt/observation metadata only; it is never sent as a
+    new verdict kind. `plan_challenge` requires `--review-kind plan`; `milestone`,
+    `correction`, and `final` require `--review-kind milestone`. The optional
+    `--quota-observations` enables Phase 6 observation-only quota capture
+    (see [references/codex-quota-observations.md](references/codex-quota-observations.md)).
 
     For plan challenge use `--review-kind plan --scope uncommitted`; the plan target binds the packet digest, repository HEAD, and contents of explicitly referenced repository paths instead of pretending an implementation diff exists. The wrapper binds the exact worktree, runs Codex read-only with closed stdin and a bounded timeout, validates the structured verdict, writes a target-bound transport-v2 receipt, and records the round in the loop-state ledger. If preflight and doctor have not passed, stop.
 
