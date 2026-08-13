@@ -5,7 +5,7 @@ description: Plan, implement, verify, and deliver substantial or high-risk softw
 
 # Codex-Reviewed Implementation
 
-Own implementation continuously; Claude is the sole production-artifact writer. Treat Codex as an independent, read-only reviewer under autonomous supervision: at each boundary, invoke it directly through the Codex CLI wrapper (`scripts/run_codex_review.py`), evaluate its structured findings, fix accepted problems, rerun verification, and re-review until it returns a valid scoped `verdict: approve`, then stop. Autonomous supervision is gated on a preflight check of the wrapper; if preflight fails, do not pretend review works — see [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
+Own implementation continuously; Claude is the sole production-artifact writer. Treat Codex as an independent, read-only reviewer under autonomous supervision: at each boundary, invoke it directly through the Codex CLI wrapper (`scripts/run_codex_review.py`), evaluate its structured findings, fix accepted problems, rerun verification, and re-review until it returns a valid scoped `verdict: approve`, then stop. Autonomous supervision requires both the free preflight and a matching successful live-doctor receipt for the installed CLI/transport/schema tuple — see [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
 
 ## Select a workflow profile
 
@@ -13,7 +13,7 @@ Before planning, select and record one profile. Use the least ceremonial profile
 
 ### Lightweight
 
-Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; run one independent Codex milestone review under autonomous supervision (or, if preflight fails and the user approves, one operator-mediated review); treat that milestone review as the final integration review unless its findings expose broader risk. Stop at the milestone boundary once Codex approves.
+Eligible only for explicitly invoked, single-milestone, low-risk changes with no security, privacy, financial, durable-state, concurrency, migration, compatibility, recovery, cross-stack, or deployment risk. Use one compact contract and checklist rather than a durable evidence artifact; skip the Codex plan challenge; run one red-green-refactor loop; run focused and repository-required verification; run one independent Codex milestone review under autonomous supervision (or, if preflight/doctor fails and the user approves, one operator-mediated review); treat that milestone review as the final integration review unless its findings expose broader risk. Stop at the milestone boundary once Codex approves.
 
 ### Standard
 
@@ -26,8 +26,8 @@ Required for security, privacy, financial, durable-state, distributed, concurren
 ## Preconditions
 
 1. Read the repository instructions, authoritative task artifacts, current-system documentation, and relevant design decisions.
-2. Run the transport preflight: `python3 scripts/run_codex_review.py preflight --schema schemas/codex-review-output.schema.json` (add `--worktree <abs-root>` to sanity-check the implementation worktree). Preflight verifies the Codex CLI is present and supported, authenticated, that the `review` surface accepts read-only and worktree binding at the `exec` level, and that the verdict schema parses — all without spending Codex usage. See [references/codex-cli-adapter.md](references/codex-cli-adapter.md).
-3. If preflight fails, STOP before implementation and report the exact failure (missing CLI, failed authentication, unsupported version, or changed transport shape). Offer operator-mediated review only as an explicit, user-approved fallback that is not equivalent to automation. Never silently downgrade to Claude-only execution.
+2. Run the free transport preflight: `python3 scripts/run_codex_review.py preflight --schema schemas/codex-review-output.schema.json --worktree <abs-root>`. It verifies CLI/auth/schema/parser prerequisites without spending usage.
+3. Require a successful doctor receipt matching the exact CLI version, platform, model, transport version, and schema digest. If none exists (or any of those changed), run the explicit paid check once: `python3 scripts/run_codex_review.py doctor --worktree <abs-root> --schema schemas/codex-review-output.schema.json --receipt <outside-worktree-doctor.json> [--model <model>]`. Pass that same model to every review using the receipt. The doctor proves plain `codex exec` returns output conforming to the production verdict schema and preserves read-only state. If preflight or doctor fails, STOP before implementation and offer operator-mediated review only as an explicit, user-approved fallback. Never silently downgrade.
 
 Before planning, inspect registered worktrees, active branches, HEAD, tracked and untracked changes, and any existing task ownership. Do not begin when another branch, worktree, agent, or process owns overlapping scope until ownership is reconciled. Use an isolated branch or worktree when repository policy requires it or when separation materially reduces risk; never create one without respecting user authorization and existing work.
 
@@ -37,7 +37,7 @@ Detect whether the project is Dockerized by inspecting repository instructions, 
 
 Supervision is autonomous: Claude invokes Codex directly through `scripts/run_codex_review.py`, bound to the exact implementation worktree, read-only, with closed stdin and a bounded timeout. The wrapper returns a structured verdict validated locally against `schemas/codex-review-output.schema.json`; Claude classifies findings, fixes accepted ones, reruns verification, and re-invokes until a valid scoped `verdict: approve`, then stops at the boundary. The user intervenes only at approval boundaries or genuine escalations.
 
-This mode is gated on preflight (Preconditions) and on the capability contract in [references/codex-cli-adapter.md](references/codex-cli-adapter.md). The wrapper uses the verified invocation `codex exec -C <worktree> -s read-only review <scope> --output-schema <schema> -o <out> --ephemeral --ignore-rules`; the `review` subcommand rejects `-C`/`-s`, so worktree binding and read-only forcing sit at the `exec` level. Never claim autonomous supervision when preflight cannot prove the transport. Never call private plugin scripts (e.g. `codex-companion.mjs`), never treat the turn-scoped stop hook or a write-capable task delegation as a cumulative review, and never allow Codex to write production artifacts.
+This mode uses plain structured `codex exec -C <worktree> -s read-only --output-schema <schema> -o <out> --ephemeral --ignore-rules <generated-review-prompt>`. Do not use `codex exec review`: its native selectors conflict with the required packet prompt and its review operation does not reliably propagate structured-output enforcement. The wrapper supplies the reviewer contract, independently resolves immutable Git identities, embeds exact scope commands, fingerprints the target, and validates the echoed identity. Never call private companion scripts, use write-capable delegation as review, or allow Codex to write production artifacts.
 
 Recursion and boundary protection are layered: the wrapper's prompt forbids loading Claude-facing skill, companion, or orchestration instructions, and `--ignore-rules` prevents project `.rules` from overriding that boundary. Codex performs the review directly.
 
@@ -152,16 +152,19 @@ For each milestone:
 
     ```
     python3 scripts/run_codex_review.py review \
+      --review-kind milestone \
       --worktree <abs-implementation-root> \
       --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
       --milestone <id> --round <n> \
       --packet <validated-review-packet> \
       --schema schemas/codex-review-output.schema.json \
+      [--model <same-model-certified-by-doctor>] \
       --output-dir <dir-outside-the-worktree> \
-      --state-ledger <loop-state-ledger-path>
+      --state-ledger <loop-state-ledger-path> \
+      --doctor-receipt <matching-doctor-receipt>
     ```
 
-    The wrapper binds the exact worktree, runs Codex read-only with closed stdin and a bounded timeout, validates the structured verdict, writes a target-bound receipt, and records the round in the loop-state ledger. Never call private plugin scripts, never simulate a result, and never use the write-capable rescue/task surface as a review. If preflight has not passed, stop.
+    For plan challenge use `--review-kind plan --scope uncommitted`; the plan target binds the packet digest, repository HEAD, and contents of explicitly referenced repository paths instead of pretending an implementation diff exists. The wrapper binds the exact worktree, runs Codex read-only with closed stdin and a bounded timeout, validates the structured verdict, writes a target-bound transport-v2 receipt, and records the round in the loop-state ledger. If preflight and doctor have not passed, stop.
 
 The packet routes the reviewer's attention; it is not proof. The reviewer must inspect the repository diff and tests independently and remain read-only.
 

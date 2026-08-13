@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -73,6 +74,10 @@ class FakeRunner:
                 return FakeCP(stdout=".git\n")
             if "HEAD" in args:
                 return FakeCP(stdout="deadbeefcafebabe000000000000000000000000\n")
+            if "--verify" in args:
+                return FakeCP(stdout="ba5eba11ba5eba11ba5eba11ba5eba11ba5eba11\n")
+        if "merge-base" in args:
+            return FakeCP(stdout="merge0000merge0000merge0000merge0000merge0000\n")
         if "branch" in args and "--show-current" in args:
             return FakeCP(stdout="main\n")
         if "status" in args:
@@ -95,14 +100,24 @@ class FakeRunner:
         elif self.verdict == "malformed":
             Path(out_path).write_text("{ not valid json", encoding="utf-8")
         elif isinstance(self.verdict, dict):
+            prompt = cmd[-1]
+            rendered = json.loads(json.dumps(self.verdict))
+            target_ref = re.search(r"^target_ref: ([a-f0-9]{64})$", prompt, re.M)
+            baseline = re.search(r"^baseline: (\S+)$", prompt, re.M)
+            if target_ref:
+                rendered["target"]["target_ref"] = target_ref.group(1)
+            if baseline:
+                rendered["target"]["baseline"] = baseline.group(1)
             Path(out_path).write_text(
-                json.dumps(self.verdict), encoding="utf-8"
+                json.dumps(rendered), encoding="utf-8"
             )
         return FakeCP(returncode=self.review_returncode, stdout="review done\n", stderr="")
 
 
 def base_verdict(worktree: str, scope: str = "uncommitted", baseline: str = "deadbeefcafebabe000000000000000000000000", *, verdict: str = "approve", findings=None) -> dict:
     return {
+        "schema_version": 2,
+        "review_kind": "milestone",
         "verdict": verdict,
         "summary": "Looks good.",
         "target": {
@@ -110,6 +125,7 @@ def base_verdict(worktree: str, scope: str = "uncommitted", baseline: str = "dea
             "worktree": worktree,
             "scope": scope,
             "baseline": baseline,
+            "target_ref": "f" * 64,
         },
         "findings": findings or [],
         "next_steps": "advance",
@@ -122,6 +138,8 @@ def finding(**over) -> dict:
         "severity": "medium",
         "title": "t",
         "explanation": "e",
+        "file": None,
+        "line": None,
         "evidence": "ev",
         "affected_behavior": "ab",
         "recommendation": "r",
@@ -131,54 +149,71 @@ def finding(**over) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# build_command / scope_flags
+# build_command / scope validation
 # ---------------------------------------------------------------------------
 
 def test_build_command_flag_placement():
     cmd = rcr.build_command(
-        worktree="/tmp/wt", scope="uncommitted",
+        worktree="/tmp/wt",
         schema_path="/tmp/s.json", out_path="/tmp/out.json",
     )
     # exec-level flags BEFORE the review subcommand
     assert cmd[:6] == ["codex", "exec", "-C", "/tmp/wt", "-s", "read-only"]
-    assert "review" in cmd
-    review_idx = cmd.index("review")
-    exec_seg = cmd[:review_idx]
-    assert "-C" in exec_seg and "-s" in exec_seg
-    # review-level flags AFTER the subcommand
-    after = cmd[review_idx:]
-    assert "--uncommitted" in after
-    assert "--output-schema" in after and "-o" in after
-    # determinism levers default to the review level (review --help documents them)
-    assert "--ephemeral" in after and "--ignore-rules" in after
-    assert "--ephemeral" not in exec_seg
+    assert "review" not in cmd
+    assert "-C" in cmd and "-s" in cmd
+    assert not ({"--uncommitted", "--base", "--commit"} & set(cmd))
+    assert "--output-schema" in cmd and "-o" in cmd
+    assert "--ephemeral" in cmd and "--ignore-rules" in cmd
     # command is an argument vector, not a shell string
     assert isinstance(cmd, list) and all(isinstance(x, str) for x in cmd)
 
 
-def test_build_command_scope_flags():
-    assert rcr.scope_flags(scope="uncommitted", base=None, commit=None) == ["--uncommitted"]
-    assert rcr.scope_flags(scope="base", base="main", commit=None) == ["--base", "main"]
-    assert rcr.scope_flags(scope="commit", base=None, commit="abc123") == ["--commit", "abc123"]
+def test_validate_scope_options():
+    assert rcr.validate_scope_options(scope="uncommitted", base=None, commit=None) is None
+    assert rcr.validate_scope_options(scope="base", base="main", commit=None) is None
+    assert rcr.validate_scope_options(scope="commit", base=None, commit="abc123") is None
 
 
 def test_build_command_model_optional():
-    without = rcr.build_command(worktree="/w", scope="uncommitted", schema_path="/s", out_path="/o")
-    with_model = rcr.build_command(worktree="/w", scope="uncommitted", schema_path="/s", out_path="/o", model="gpt-5")
+    without = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o")
+    with_model = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o", model="gpt-5")
     assert "-m" not in without
     assert with_model[with_model.index("-m") + 1] == "gpt-5"
+
+
+def test_scope_contract_preserves_packet_and_exact_target():
+    fingerprint = "a" * 64
+    resolved = {"baseline": "headsha", "head": "headsha"}
+    contract = rcr.scope_contract("uncommitted", resolved, fingerprint)
+    prompt = rcr.build_prompt("directed question", contract)
+    assert "git diff --cached --binary --no-ext-diff" in prompt
+    assert "git ls-files --others --exclude-standard" in prompt
+    assert f"target_ref: {fingerprint}" in prompt
+    assert "directed question" in prompt
+
+
+def test_scope_contract_base_and_commit_are_immutable():
+    base = rcr.scope_contract(
+        "base", {"baseline": "base_sha", "head": "head_sha", "merge_base": "merge_sha"},
+        "b" * 64,
+    )
+    commit = rcr.scope_contract(
+        "commit", {"baseline": "commit_sha", "commit": "commit_sha"}, "c" * 64,
+    )
+    assert "git diff --binary --no-ext-diff merge_sha" in base
+    assert "git show --binary --no-ext-diff --format=fuller commit_sha" in commit
 
 
 def test_scope_exclusivity():
     import pytest
     with pytest.raises(ValueError):
-        rcr.scope_flags(scope="uncommitted", base="main", commit=None)
+        rcr.validate_scope_options(scope="uncommitted", base="main", commit=None)
     with pytest.raises(ValueError):
-        rcr.scope_flags(scope="base", base=None, commit=None)
+        rcr.validate_scope_options(scope="base", base=None, commit=None)
     with pytest.raises(ValueError):
-        rcr.scope_flags(scope="commit", base="main", commit="abc")
+        rcr.validate_scope_options(scope="commit", base="main", commit="abc")
     with pytest.raises(ValueError):
-        rcr.scope_flags(scope="bogus", base=None, commit=None)
+        rcr.validate_scope_options(scope="bogus", base=None, commit=None)
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +222,7 @@ def test_scope_exclusivity():
 
 def _valid_inputs(**over):
     base = dict(
-        worktree="/tmp/wt", scope="uncommitted", base=None, commit=None,
+        review_kind="milestone", worktree="/tmp/wt", scope="uncommitted", base=None, commit=None,
         packet_path="/tmp/packet.md", schema_path="/tmp/s.json", output_dir="/tmp/out",
     )
     base.update(over)
@@ -196,7 +231,7 @@ def _valid_inputs(**over):
 
 def test_validate_inputs_ok(tmp_path):
     packet = tmp_path / "p.md"; packet.write_text("x")
-    schema = tmp_path / "s.json"; schema.write_text("{}")
+    schema = tmp_path / "s.json"; schema.write_text('{"properties":{"schema_version":{"const":2}}}')
     wt = tmp_path / "wt"; wt.mkdir()
     out = tmp_path / "out"
     errs = rcr.validate_inputs(**_valid_inputs(
@@ -213,7 +248,7 @@ def test_validate_inputs_rejects_output_inside_worktree(tmp_path):
 
 def test_validate_inputs_rejects_oversized_packet(tmp_path):
     packet = tmp_path / "p.md"; packet.write_text("x" * (rcr.MAX_PACKET_BYTES + 1))
-    schema = tmp_path / "s.json"; schema.write_text("{}")
+    schema = tmp_path / "s.json"; schema.write_text('{"properties":{"schema_version":{"const":2}}}')
     errs = rcr.validate_inputs(**_valid_inputs(packet_path=str(packet), schema_path=str(schema)))
     assert any("max is" in e for e in errs)
 
@@ -236,7 +271,7 @@ def test_validate_inputs_nonabs_worktree():
 
 def test_validate_verdict_approve_clean():
     v = base_verdict("/tmp/wt")
-    assert rcr.validate_verdict(v, expected_worktree="/tmp/wt", expected_scope="uncommitted", expected_baseline=v["target"]["baseline"]) == []
+    assert rcr.validate_verdict(v, expected_worktree="/tmp/wt", expected_scope="uncommitted", expected_baseline=v["target"]["baseline"], expected_target_ref=v["target"]["target_ref"]) == []
 
 
 def test_validate_verdict_needs_attention_with_finding():
@@ -247,7 +282,7 @@ def test_validate_verdict_needs_attention_with_finding():
 def test_validate_verdict_approve_with_blocking_rejected():
     v = base_verdict("/tmp/wt", findings=[finding(severity="high")])
     errs = rcr.validate_verdict(v, expected_worktree="/tmp/wt", expected_scope="uncommitted", expected_baseline=v["target"]["baseline"])
-    assert any("approve but a blocking" in e for e in errs)
+    assert any("approve but findings" in e for e in errs)
 
 
 def test_validate_verdict_missing_keys():
@@ -286,6 +321,27 @@ def test_validate_verdict_target_scope_mismatch():
     v["target"]["baseline"] = "main"
     errs = rcr.validate_verdict(v, expected_worktree="/tmp/wt", expected_scope="uncommitted", expected_baseline="main")
     assert any("target.scope does not match" in e for e in errs)
+
+
+def test_validate_verdict_target_fingerprint_mismatch():
+    v = base_verdict("/tmp/wt")
+    errs = rcr.validate_verdict(
+        v, expected_worktree="/tmp/wt", expected_scope="uncommitted",
+        expected_baseline=v["target"]["baseline"], expected_target_ref="0" * 64,
+    )
+    assert any("target.target_ref does not match" in e for e in errs)
+
+
+def test_validate_verdict_rejects_approve_with_low_finding_and_path_escape():
+    v = base_verdict(
+        "/tmp/wt", findings=[finding(severity="low", file="../escape.py", line="1-2")]
+    )
+    errs = rcr.validate_verdict(
+        v, expected_worktree="/tmp/wt", expected_scope="uncommitted",
+        expected_baseline=v["target"]["baseline"],
+    )
+    assert any("approve but findings" in e for e in errs)
+    assert any("repository-relative" in e for e in errs)
 
 
 def test_validate_verdict_bad_finding_id():
@@ -343,7 +399,7 @@ def test_version_is_supported():
 
 def _run(tmp_path, *, verdict, review_returncode=0, raise_on_review=None,
          dirty_lines=None, mutate_on_review=False, scope="uncommitted",
-         base=None, commit=None, state_ledger=None):
+         base=None, commit=None, state_ledger=None, review_kind="milestone"):
     wt = tmp_path / "wt"; wt.mkdir()
     (wt / ".git").mkdir()  # not a real repo, but git calls are faked
     out = tmp_path / "out"
@@ -356,7 +412,7 @@ def _run(tmp_path, *, verdict, review_returncode=0, raise_on_review=None,
         mutate_on_review=mutate_on_review,
     )
     return rcr.run_review(
-        worktree=str(wt), scope=scope, base=base, commit=commit,
+        review_kind=review_kind, worktree=str(wt), scope=scope, base=base, commit=commit,
         packet_path=str(packet), schema_path=str(schema), output_dir=str(out),
         milestone="m1", round_no=1, state_ledger=state_ledger,
         runner=fake,
@@ -431,7 +487,7 @@ def test_run_review_approve_with_blocking_is_invalid(tmp_path):
     v = base_verdict(str(wt), findings=[finding(severity="critical")])
     res, *_ = _run(tmp_path, verdict=v)
     assert res.outcome == "invalid_output"
-    assert "blocking" in res.diagnostics
+    assert "findings are present" in res.diagnostics
 
 
 def test_run_review_target_changed(tmp_path):
@@ -477,7 +533,7 @@ def test_run_review_replays_completed_ledger_round(tmp_path):
         round_no=1, state_ledger=str(ledger), runner=fake,
     )
     assert replay.outcome == first.outcome
-    assert not any(call[0] == "codex" and "review" in call for call in fake.calls)
+    assert not any(call[0] == "codex" and "exec" in call and "--output-schema" in call for call in fake.calls)
 
 
 def test_run_review_rejects_conflicting_completed_round(tmp_path):
@@ -500,10 +556,65 @@ def test_run_review_scope_base_uses_baseline(tmp_path):
     v = base_verdict(str(wt), scope="base", baseline="main")
     res, wta, baseline, fake, out = _run(tmp_path, verdict=v, scope="base", base="main")
     assert res.outcome == "completed"
-    # the --base main flag is present in the recorded command
+    # Native selectors conflict with a prompt; immutable scope is in the custom
+    # review prompt and no selector is passed to the CLI.
     receipt = json.loads(next(Path(out).glob("receipt-*.json")).read_text())
-    assert "--base" in receipt["transport"]["command"]
-    assert "main" in receipt["transport"]["command"]
+    assert "--base" not in receipt["transport"]["command"]
+    review_call = next(call for call in fake.calls if call[0] == "codex" and "exec" in call and "--output-schema" in call)
+    assert "scope: base" in review_call[-1]
+    assert "merge_base:" in review_call[-1]
+    assert "git diff --binary --no-ext-diff" in review_call[-1]
+
+
+def test_run_plan_review_uses_plan_identity_not_code_diff(tmp_path):
+    wt = tmp_path / "wt"
+    verdict = base_verdict(str(wt), scope="plan")
+    verdict["review_kind"] = "plan"
+    res, *_rest = _run(tmp_path, verdict=verdict, review_kind="plan")
+    assert res.outcome == "completed"
+    assert res.receipt["target"]["scope"] == "plan"
+    assert res.verdict["review_kind"] == "plan"
+
+
+def test_commit_fingerprint_ignores_unrelated_dirty_state(tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    fake = FakeRunner(worktree=str(wt), dirty_lines=[" M unrelated.py"], diff_text="dirty")
+    identity = rcr.git_identity(str(wt), runner=fake)
+    resolved = {"baseline": "c" * 40, "commit": "c" * 40}
+    first = rcr.target_fingerprint(str(wt), identity, scope="commit", resolved=resolved, runner=fake)
+    fake.diff_text = "different unrelated dirty content"
+    second = rcr.target_fingerprint(str(wt), identity, scope="commit", resolved=resolved, runner=fake)
+    assert first == second
+
+
+def test_doctor_receipt_version_binding(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({**rcr.doctor_key("codex-cli 0.146.0"), "outcome": "passed"}))
+    fake = FakeRunner(worktree=str(tmp_path))
+    assert rcr.verify_doctor_receipt(str(receipt), runner=fake) == []
+    data = json.loads(receipt.read_text()); data["transport_version"] = 1
+    receipt.write_text(json.dumps(data))
+    assert any("transport_version" in e for e in rcr.verify_doctor_receipt(str(receipt), runner=fake))
+
+
+def test_doctor_receipt_model_binding(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({**rcr.doctor_key("codex-cli 0.146.0", "gpt-5.4"), "outcome": "passed"}))
+    fake = FakeRunner(worktree=str(tmp_path))
+    assert rcr.verify_doctor_receipt(str(receipt), model="gpt-5.4", runner=fake) == []
+    assert any("model" in e for e in rcr.verify_doctor_receipt(str(receipt), model="gpt-5.3", runner=fake))
+
+
+def test_plan_fingerprint_tracks_referenced_file_contents(tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    referenced = wt / "src" / "contract.py"; referenced.parent.mkdir()
+    referenced.write_text("v1")
+    packet = tmp_path / "packet.md"; packet.write_text("Inspect src/contract.py")
+    first, paths = rcr.plan_fingerprint(str(packet), str(wt), "head")
+    referenced.write_text("v2")
+    second, _ = rcr.plan_fingerprint(str(packet), str(wt), "head")
+    assert paths == ["src/contract.py"]
+    assert first != second
 
 
 # ---------------------------------------------------------------------------

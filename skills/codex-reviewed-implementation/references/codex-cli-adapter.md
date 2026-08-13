@@ -9,8 +9,8 @@ installed CLI provides it, and pins the exact verified invocation.
 This replaces the earlier plugin-only adapter. The Claude-side Codex **plugin**
 (`/codex:review`, `/codex:adversarial-review`) is operator-only
 (`disable-model-invocation: true`) and is retained here only as a labeled
-fallback. The Codex **CLI** (`codex exec review`) is the public model-callable
-transport this skill automates.
+fallback. Plain structured Codex **CLI** execution (`codex exec`) is the public
+model-callable transport this skill automates.
 
 ## Required transport capability contract
 
@@ -32,12 +32,12 @@ which capability is absent.
 
 Verified directly against the installed CLI (probe-confirmed, not assumed):
 
-- **Public model invocation (1): YES.** `codex exec review` ("Run a code review
-  against the current repository") is a public CLI subcommand Claude invokes
-  from its allowed shell surface. No operator command is required.
-- **Git scope (2): YES.** `--uncommitted` (staged+unstaged+untracked),
-  `--base <BRANCH>`, and `--commit <SHA>` are real target selectors; only one per
-  invocation.
+- **Public model invocation (1): YES.** Plain `codex exec` is public and model-callable.
+- **Git scope (2): YES, wrapper-enforced.** Codex CLI deliberately conflicts
+  native selectors (`--uncommitted`, `--base`, `--commit`) with the custom prompt
+  required for the review packet. The wrapper therefore uses plain structured
+  exec, resolves refs to immutable SHAs, supplies exact Git
+  inspection commands, fingerprints the target, and rejects mismatched output.
 - **Read-only reviewer (3): YES.** Read-only is forced at the `exec` level with
   `-s read-only`. (The `review` subcommand rejects `-s`; see the invocation
   below.) A runtime mutation test must still prove it for Safety-critical use.
@@ -65,23 +65,20 @@ prove the boundary holds.
 
 ## Verified invocation (the only form the wrapper uses)
 
-The `review` subcommand rejects `-C` and `-s` (probe-confirmed: the CLI returns
-`unexpected argument '-C'` / `'--sandbox'`). Worktree binding and read-only
-forcing MUST sit at the `exec` level, before the subcommand. The review
-instructions are passed as a positional argument and stdin is closed from
-`/dev/null` to avoid non-TTY EOF deadlocks:
+The `review` operation does not reliably carry `--output-schema`, and every
+native selector conflicts with `[PROMPT]`. The automated path therefore uses
+plain exec with an explicit reviewer contract; stdin is closed from `/dev/null`:
 
 ```text
-codex exec -C <abs-worktree> -s read-only review \
-  (--uncommitted | --base <ref> | --commit <sha>) \
+codex exec -C <abs-worktree> -s read-only \
   --output-schema schemas/codex-review-output.schema.json \
   -o <verdict-out.json> --ephemeral --ignore-rules [-m <model>] \
-  -- <review-prompt>     # stdin closed from /dev/null
+  <reviewer-contract-scope-and-packet>     # stdin closed from /dev/null
 ```
 
 The wrapper `scripts/run_codex_review.py` builds this as an argument vector
-(never a shell string), enforces scope exclusivity, validates refs via Git
-argument separation, runs the process in its own session with a bounded timeout,
+(never a shell string), enforces scope exclusivity, resolves refs via Git
+argument separation to immutable object ids, runs the process in its own session with a bounded timeout,
 captures stdout/stderr separately with secret redaction, validates the verdict
 locally, re-checks the content fingerprint after Codex exits, and writes a
 receipt plus a locked, idempotent loop-state ledger.
@@ -90,11 +87,13 @@ receipt plus a locked, idempotent loop-state ledger.
 
 ```
 python3 scripts/run_codex_review.py preflight [--worktree <root>] [--schema <schema>]
+python3 scripts/run_codex_review.py doctor --worktree <root> --schema <schema> --receipt <outside-worktree.json> [--model <model>]
 python3 scripts/run_codex_review.py review \
+  --review-kind plan|milestone \
   --worktree <abs-root> --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
   --milestone <id> --round <n> --packet <packet> --schema <schema> \
   --output-dir <dir-outside-worktree> [--timeout <sec>] [--model <m>] \
-  [--state-ledger <path>]
+  --doctor-receipt <matching-doctor.json> [--state-ledger <path>]
 ```
 
 Preflight spends no Codex usage: it checks the binary, version, auth, schema,
@@ -107,8 +106,9 @@ non-zero and produces no verdict.
 
 ## Fallback mode — operator-mediated plugin review (NOT the automated path)
 
-When preflight fails (missing CLI, failed auth, unsupported version, or changed
-transport shape), review may fall back to the operator-only plugin commands.
+When preflight or the matching live doctor fails (missing CLI, failed auth,
+unsupported version, changed transport shape, schema failure, or read-only
+failure), review may fall back to the operator-only plugin commands.
 This is a FALLBACK, not the intended workflow, and must be explicitly accepted by
 the user:
 
@@ -147,8 +147,9 @@ instruction-boundary forward test.
 ## Decision procedure
 
 1. Run `scripts/run_codex_review.py preflight`.
-2. If preflight passes → autonomous mode. Run review through the wrapper.
-3. If preflight fails → autonomous supervision is unavailable for this
+2. Verify a matching successful doctor receipt; run `doctor` once after any CLI, platform, transport, or schema change.
+3. If both pass → autonomous mode. Run review through the wrapper.
+4. If either fails → autonomous supervision is unavailable for this
    environment. Report the exact failure. Offer operator-mediated plugin review
    only as an explicitly accepted fallback; never silently downgrade to
    Claude-only execution, and never claim automation when the transport is

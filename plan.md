@@ -473,7 +473,97 @@ Make quota behavior predictable, configurable, and truthful.
 - the documentation states that the reserve is conservative but not
   mathematically exact because usage accounting may lag an active turn.
 
-# Phase 5 — Automate `codex-reviewed-implementation` through the Codex CLI
+---
+
+## Phase 6 — Autoplan review (2026-08-13, codex-cli surface probed)
+
+Three independent voices reviewed Phase 6: a strategy (CEO) subagent, an
+engineering subagent that ran `codex app-server generate-json-schema` against the
+installed CLI, and Codex itself (reviewing its own quota surface). All three
+converge: **Phase 6 as written is over-engineered around an unstable, semantically
+weak signal, and the core "preserve 20% weekly reserve" invariant cannot be
+enforced.**
+
+### Verified transport facts (empirical, codex-cli 0.146.0 schema)
+
+- `account/rateLimits/read` **exists** but is a **v2-only** method; `codex
+  app-server` and its `generate-json-schema` subcommand are both marked
+  **experimental**. v1 of the same protocol has zero rate-limit methods — the
+  surface was added recently and is still churning.
+- `windowDurationMins == 10080` appears **nowhere** in the schema. The field is
+  an unconstrained nullable `integer|null` with no enum and no doc tying a value
+  to "weekly." The plan's weekly-discovery rule is an unverified guess, not a
+  contract.
+- `usedPercent` is a whole **`integer`/`int32`**. Workstream 3's boundary tests
+  at `74.9%` and `79.9%` are **unimplementable**; the 75→80 "headroom" is just
+  the integer buckets 75–79.
+- The response also exposes `rateLimitResetCredits` (redeemable, with a
+  `consume` method), `individualLimit`, `planType`, and `rateLimitReachedType` —
+  none accounted for. Reset credits can shorten the wait the blocked-state reports.
+- Codex (inside its own sandbox) reported its version as `0.137.0`; the subagent
+  saw `0.146.0`. The `codex` version itself is ambiguous across contexts.
+
+### Consensus table
+
+| Dimension | CEO subagent | Eng subagent | Codex | Consensus |
+|---|---|---|---|---|
+| Machine-enforce right for a single user? | No — advisory suffices | premise assumed | No — disproportionate | **2/3 disagree with plan** |
+| `10080` weekly identifier reliable? | Unverified (High) | Unverified (Critical) | Not a contract | **CONFIRMED risk** |
+| `usedPercent` fractional precision? | Impossible (Med) | — | Impossible | **CONFIRMED** |
+| "Preserve 20%" enforceable? | No | No — no machine-wide lock (Critical) | Cannot be enforced | **CONFIRMED unenforceable** |
+| Scope proportional? | No — MVP 1–2 workstreams | 20 fixes if kept | Grossly disproportionate | **CONFIRMED** |
+| Fail-closed on missing RPC safe? | No — advisory only | Blocks every mandatory review | Availability hazard | **CONFIRMED** |
+| Emergency SIGINT safe? | Disproportionate | Orphans tree (High) w/o killpg | Confirmed orphan risk | **CONFIRMED** |
+| Durable resumption satisfiable? | Needs scheduler (Med-High) | Unsatisfiable one-shot (High) | Confirmed unsatisfiable | **CONFIRMED** |
+
+### Confirmed architectural risks (Codex + Eng subagent)
+
+1. **No machine-wide admission lock.** Two concurrent wrapper invocations each
+   read 74% → both ALLOW → collective overshoot. The per-ledger flock
+   (`run_codex_review.py:670`) serializes one ledger, not the account. Cannot
+   protect against IDE / other-machine / manual `codex` spend either.
+2. **SIGINT orphans the subprocess tree.** `start_new_session=True`
+   (`run_codex_review.py:948`) makes Codex a session leader; signaling the child
+   PID leaves descendants reparented to init. Fix: `os.killpg(os.getpgid(pid),
+   SIGINT)` → grace → `SIGKILL` the group. (Latent Phase 5 bug too.)
+3. **Reader and reviewer can hit different accounts/endpoints.** `CODEX_HOME`,
+   profiles, `-c` overrides, `--ignore-user-config`, base URL can all diverge.
+   Version match is insufficient; needs a canonical env bundle + server-returned
+   account identity binding.
+4. **Durable resumption is unsatisfiable for a one-shot CLI.** A wrapper that
+   exits cannot wake at `resetsAt`. "Resumes after reset" is false without a
+   daemon / launchd / cron / orchestrator — the same blocker that deferred Phase 4.
+
+### Recommendation (3/3 voices)
+
+Reframe Phase 6 to a **best-effort advisory preflight**, not a fail-closed
+orchestration subsystem: bounded quota read; warn at >=75% only when an
+unambiguous seven-day window is reported; on missing/incompatible RPC report
+"unsupported" and **continue**; no synthetic reservations, single-use receipts,
+emergency SIGINT, or durable blocked-state machine; integer-only boundary tests;
+let the Codex backend enforce the real limit. If a hard local ceiling is
+genuinely wanted, use a simple operator-configured launch ceiling — do not claim
+the wrapper enforces a backend reserve.
+
+### Decision audit trail
+
+| # | Decision | Class | Principle | Disposition |
+|---|----------|-------|-----------|-------------|
+| 1 | Reframe machine-enforced gate → advisory preflight | **USER CHALLENGE** (2/3 models) | P1/P3 | SURFACED at gate |
+| 2 | Drop `10080` rule → live-probe weekly detection | Mechanical (Critical) | P5 | Auto-decided: verify empirically |
+| 3 | Drop fractional boundary tests → integer-only | Mechanical | P5 | Auto-decided: adopt |
+| 4 | Add `killpg` process-group termination | Mechanical (High) | P1 | Auto-decided: adopt if any read built |
+| 5 | Pin reader/reviewer to canonical env + account id | Mechanical (High) | P1 | Auto-decided: adopt if any read built |
+| 6 | Drop fail-closed for missing/incompatible RPC | Taste (Critical) | P5 | SURFACED at gate |
+| 7 | Drop durable blocked-state machine | Taste (High) | P3/P5 | SURFACED at gate |
+| 8 | Drop emergency SIGINT interruption | Taste (High) | P3 | SURFACED at gate |
+| 9 | Instrument usage 2–4 weeks before building | Taste (CEO) | P6 | SURFACED at gate |
+
+**Status: AWAITING PREMISE / USER-CHALLENGE DECISION.** DX and failure-modes
+sections deferred — contingent on whether Phase 6 stays machine-enforced or
+reframes to advisory.
+
+# Phase 5 — Automate `codex-reviewed-implementation` through the Codex CLI [done]
 
 ## Outcome
 
