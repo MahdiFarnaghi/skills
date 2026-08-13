@@ -196,6 +196,7 @@ class AppServerClient:
         self._cmd = list(_cmd) if _cmd is not None else self._build_cmd(codex_path, model)
         self._proc: subprocess.Popen | None = None
         self._next_id = 1
+        self._initialized = False
 
     def _build_cmd(self, codex_path: str, model: str | None) -> list[str]:
         cmd = [codex_path, "app-server"]
@@ -220,10 +221,43 @@ class AppServerClient:
                 env=env,
                 start_new_session=True,
             )
+            self._initialized = False
         except FileNotFoundError as exc:
             raise QuotaUnavailable(f"codex app-server not found: {exc}") from exc
         except OSError as exc:  # pragma: no cover - rare
             raise QuotaReadError(f"could not start app-server: {exc}") from exc
+
+        # The app-server rejects application methods until the JSON-RPC
+        # initialize/initialized handshake completes.
+        init_id = self._next_id
+        self._next_id += 1
+        self._write_message({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "codex-quota-observer", "version": "1"},
+                # account/rateLimits/read is an experimental v2 method, so the
+                # capability must be negotiated explicitly.
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        deadline = time.monotonic() + self._timeout
+        _read_jsonrpc_response(
+            lambda: self._read_line_with_deadline(deadline), init_id
+        )
+        self._write_message({
+            "jsonrpc": "2.0", "method": "initialized", "params": {}
+        })
+        self._initialized = True
+
+    def _write_message(self, message: dict) -> None:
+        assert self._proc is not None and self._proc.stdin is not None
+        try:
+            self._proc.stdin.write(json.dumps(message) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise QuotaReadError(f"app-server stream closed: {exc}") from exc
 
     def _read_line_with_deadline(self, deadline: float) -> str | None:
         remaining = deadline - time.monotonic()
@@ -241,15 +275,12 @@ class AppServerClient:
 
     def call(self, method: str, params: dict) -> dict:
         self._ensure()
-        assert self._proc is not None and self._proc.stdin is not None
+        assert self._initialized
         req_id = self._next_id
         self._next_id += 1
-        request = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}) + "\n"
-        try:
-            self._proc.stdin.write(request)
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise QuotaReadError(f"app-server stream closed: {exc}") from exc
+        self._write_message({
+            "jsonrpc": "2.0", "id": req_id, "method": method, "params": params
+        })
         deadline = time.monotonic() + self._timeout
         return _read_jsonrpc_response(lambda: self._read_line_with_deadline(deadline), req_id)
 
@@ -257,6 +288,7 @@ class AppServerClient:
         if self._proc is not None:
             codex_process.kill_process_group(self._proc, grace=1.0)
             self._proc = None
+            self._initialized = False
 
 
 def capture_snapshot(

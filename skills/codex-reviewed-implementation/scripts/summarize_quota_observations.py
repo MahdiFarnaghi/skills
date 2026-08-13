@@ -15,6 +15,7 @@ without a live Codex call.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 from datetime import datetime, timezone
@@ -402,28 +403,57 @@ def write_report(
     return {"written": True, "json_path": json_path, "md_path": md_path}
 
 
+def _observation_paths(log_path: str) -> list[str]:
+    """Return retained rotations oldest-first, followed by the active log."""
+    absolute = os.path.abspath(log_path)
+    directory = os.path.dirname(absolute)
+    base = os.path.basename(absolute)
+    stem = base[:-6] if base.endswith(".jsonl") else base
+    try:
+        rotated = [
+            os.path.join(directory, name)
+            for name in os.listdir(directory)
+            if name.startswith(stem + ".") and name.endswith(".jsonl")
+            and name != base
+        ]
+    except OSError:
+        rotated = []
+    rotated.sort(key=lambda path: (os.path.getmtime(path), path))
+    return rotated + ([absolute] if os.path.isfile(absolute) else [])
+
+
 def _read_records(log_path: str) -> tuple[list[dict], int]:
     records: list[dict] = []
     corrupt = 0
-    if not os.path.isfile(log_path):
-        return records, corrupt
+    by_invocation: dict[str, dict] = {}
+    lock_path = os.path.abspath(log_path) + ".lock"
     try:
-        with open(log_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    corrupt += 1
-                    continue
-                if isinstance(rec, dict) and rec.get("invocation_id"):
-                    records.append(rec)
-                else:
-                    corrupt += 1
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.chmod(lock_path, 0o600)
+        with os.fdopen(lock_fd, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+            try:
+                for path in _observation_paths(log_path):
+                    with open(path, encoding="utf-8") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                rec = json.loads(line)
+                            except ValueError:
+                                corrupt += 1
+                                continue
+                            iid = rec.get("invocation_id") if isinstance(rec, dict) else None
+                            if iid:
+                                by_invocation[str(iid)] = rec
+                            else:
+                                corrupt += 1
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     except OSError:
-        return records, corrupt
+        pass
+    records.extend(by_invocation.values())
     return records, corrupt
 
 

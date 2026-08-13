@@ -181,6 +181,14 @@ def test_build_command_model_optional():
     assert with_model[with_model.index("-m") + 1] == "gpt-5"
 
 
+def test_build_command_uses_resolved_codex_path():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o",
+        codex_path="/opt/codex/bin/codex",
+    )
+    assert cmd[0] == "/opt/codex/bin/codex"
+
+
 def test_scope_contract_preserves_packet_and_exact_target():
     fingerprint = "a" * 64
     resolved = {"baseline": "headsha", "head": "headsha"}
@@ -773,6 +781,29 @@ def test_observation_covers_failure_and_timeout(tmp_path):
         review_phase="milestone", quota_observer=obs,
     )
     assert obs.after_calls == 1  # after-snapshot captured even on process failure
+    assert obs.records[0][0]["outcome"] == "process_failed"
+
+
+def test_observation_after_runs_when_review_spawn_raises_oserror(tmp_path):
+    wt = tmp_path / "wt"
+    packet = tmp_path / "packet.md"; packet.write_text("p")
+    schema = tmp_path / "schema.json"; schema.write_text("{}")
+    obs = FakeQuotaObserver()
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)))
+
+    def raising_runner(cmd, **kwargs):
+        if "exec" in cmd:
+            raise PermissionError("cannot execute")
+        return fake(cmd, **kwargs)
+
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(packet), schema_path=str(schema),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        runner=raising_runner, review_phase="milestone", quota_observer=obs,
+    )
+    assert res.outcome == "process_failed"
+    assert obs.after_calls == 1
     assert obs.records[0][0]["outcome"] == "process_failed"
 
 

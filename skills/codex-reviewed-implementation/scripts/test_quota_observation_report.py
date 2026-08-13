@@ -280,6 +280,18 @@ def test_summarize_counts_and_skips_corrupt(tmp_path):
     assert rep["input_record_count"] == 30  # corrupt records skipped, not counted as input
 
 
+def test_summarize_includes_retained_rotated_logs(tmp_path):
+    log = tmp_path / "quota-observations.jsonl"
+    records = _eligible_records()
+    rotated = tmp_path / "quota-observations.100.jsonl"
+    _write_log(rotated, records[:20])
+    _write_log(log, records[20:])
+    res = sq.summarize(str(log))
+    assert res["status"] == "decision_required"
+    report = json.loads((tmp_path / "quota-report.json").read_text())
+    assert report["input_record_count"] == 30
+
+
 def test_summarize_replaces_when_data_changes(tmp_path):
     log = tmp_path / "quota-observations.jsonl"
     _write_log(log, _eligible_records())

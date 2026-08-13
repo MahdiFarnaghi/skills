@@ -402,13 +402,16 @@ def append_observation(
     now = (now_epoch or time.time)()
     try:
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
-        # Create with 0600 before the first append if it does not exist.
-        if not os.path.exists(log_path):
-            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.close(fd)
-        with open(_lock_path(log_path), "a+", encoding="utf-8") as lock:
+        lock_fd = os.open(_lock_path(log_path), os.O_RDWR | os.O_CREAT, 0o600)
+        os.chmod(_lock_path(log_path), 0o600)
+        with os.fdopen(lock_fd, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                # Creation belongs inside the critical section. O_APPEND avoids
+                # the first-writer TOCTOU truncation race.
+                if not os.path.exists(log_path):
+                    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    os.close(fd)
                 if max_bytes and max_bytes > 0 and os.path.getsize(log_path) >= max_bytes:
                     rotated_to = _rotate(log_path, now_epoch=now)
                     if rotated_to:
@@ -416,7 +419,7 @@ def append_observation(
                         summary["rotated_to"] = rotated_to
                     # Recreate the (now-missing) current log at 0600.
                     if not os.path.exists(log_path):
-                        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                         os.close(fd)
                 _enforce_retention(log_path, retain_days=retain_days, min_files=min_files, now_epoch=now)
                 line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"

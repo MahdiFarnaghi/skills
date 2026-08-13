@@ -178,7 +178,9 @@ ECHO_SERVER = textwrap.dedent(
         method = msg.get("method")
         if mid is None:
             continue
-        if method == "account/rateLimits/read":
+        if method == "initialize":
+            result = {"protocolVersion": "2"}
+        elif method == "account/rateLimits/read":
             result = {"rateLimits": {"limitId": "codex",
                     "primary": {"usedPercent": 42, "resetsAt": 1000, "windowDurationMins": 10080}}}
         elif method == "account/read":
@@ -216,6 +218,32 @@ def test_appserver_client_round_trip(tmp_path):
     assert snap["status"] == "ok"
     assert snap["candidates"][0]["used_percent"] == 42
     assert snap["account_pseudonym"] == qo.account_pseudonym("alice@example.com", SALT)
+
+
+def test_appserver_client_performs_handshake_before_application_rpc(tmp_path):
+    script = tmp_path / "strict_server.py"
+    script.write_text(textwrap.dedent("""
+        import json, sys
+        initialized = False
+        for line in sys.stdin:
+            msg = json.loads(line)
+            method = msg.get("method")
+            if method == "initialize":
+                assert not initialized
+                assert msg["params"]["capabilities"]["experimentalApi"] is True
+                print(json.dumps({"jsonrpc":"2.0", "id":msg["id"], "result":{}}), flush=True)
+            elif method == "initialized":
+                initialized = True
+            else:
+                assert initialized, "application RPC arrived before handshake"
+                result = ({"rateLimits": {}} if method == "account/rateLimits/read"
+                          else {"account": {}})
+                print(json.dumps({"jsonrpc":"2.0", "id":msg["id"], "result":result}), flush=True)
+    """))
+    snap = rcq.capture_snapshot(
+        codex_path="ignored", salt=SALT, _cmd=[sys.executable, str(script)]
+    )
+    assert snap["status"] in ("ok", "ambiguous")
 
 
 def test_appserver_client_timeout_kills_group(tmp_path):

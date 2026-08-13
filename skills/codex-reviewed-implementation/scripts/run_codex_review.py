@@ -239,11 +239,12 @@ def build_command(
     schema_path: str,
     out_path: str,
     model: str | None = None,
+    codex_path: str = "codex",
     exec_flags: Sequence[str] = ("--ephemeral", "--ignore-rules"),
 ) -> list[str]:
     """Build the plain structured ``codex exec`` argument vector."""
     cmd: list[str] = [
-        "codex",
+        codex_path,
         "exec",
         "-C",
         worktree,
@@ -1036,13 +1037,13 @@ def doctor_key(codex_version: str, model: str | None = None) -> dict[str, Any]:
 
 def verify_doctor_receipt(
     path: str, *, schema_path: str | None = None, model: str | None = None,
-    runner: Runner | None = None
+    runner: Runner | None = None, codex_path: str = "codex",
 ) -> list[str]:
     try:
         receipt = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [f"doctor receipt is unreadable: {exc}"]
-    expected = doctor_key(_codex_version(runner=runner), model)
+    expected = doctor_key(_codex_version(codex_path, runner=runner), model)
     if schema_path:
         expected["schema_digest"] = file_digest(schema_path)
     errors = [f"doctor receipt mismatch: {key}" for key, value in expected.items() if receipt.get(key) != value]
@@ -1055,6 +1056,7 @@ def run_doctor(
     *, worktree: str, schema_path: str, receipt_path: str, timeout: float = 180.0,
     model: str | None = None, runner: Runner | None = None,
     quota_observer: Any = None,
+    codex_path: str = "codex",
 ) -> tuple[bool, dict[str, Any]]:
     """Perform the explicit paid structured-output/read-only transport check."""
     runner = runner or subprocess.run
@@ -1069,6 +1071,7 @@ def run_doctor(
         doctor_ref = "d" * 64
         cmd = build_command(
             worktree=worktree, schema_path=schema_path, out_path=output_path, model=model,
+            codex_path=codex_path,
         )
         prompt = (
             "Transport doctor only. Do not edit files or run commands. Return a schema-valid "
@@ -1098,7 +1101,7 @@ def run_doctor(
     after = target_fingerprint(worktree, post_identity, scope="uncommitted", resolved=resolved, runner=runner)
     passed = process_ok and before == after
     receipt = {
-        **doctor_key(_codex_version(runner=runner), model),
+        **doctor_key(_codex_version(codex_path, runner=runner), model),
         "schema_digest": file_digest(schema_path),
         "outcome": "passed" if passed else "failed",
         "checked_at": utc_now(),
@@ -1121,7 +1124,7 @@ def run_doctor(
                     "transport_version": TRANSPORT_VERSION,
                     "schema_digest": file_digest(schema_path) if os.path.isfile(schema_path) else None,
                     "doctor_receipt_digest": file_digest(receipt_path),
-                    "codex_path": shutil.which("codex") or "codex",
+                    "codex_path": codex_path,
                     "codex_version": receipt.get("codex_version"),
                     "model": model,
                     "review_kind": None,
@@ -1224,6 +1227,7 @@ def run_review(
     doctor_receipt: str | None = None,
     review_phase: str = "milestone",
     quota_observer: Any = None,
+    codex_path: str = "codex",
 ) -> ReviewResult:
     """Execute one bounded review and return a classified result + receipt.
 
@@ -1233,7 +1237,8 @@ def run_review(
     runner = runner or subprocess.run
     if doctor_receipt:
         doctor_errors = verify_doctor_receipt(
-            doctor_receipt, schema_path=schema_path, model=model, runner=runner
+            doctor_receipt, schema_path=schema_path, model=model, runner=runner,
+            codex_path=codex_path,
         )
         if doctor_errors:
             return ReviewResult(outcome="doctor_required", diagnostics="; ".join(doctor_errors))
@@ -1292,6 +1297,7 @@ def run_review(
         schema_path=os.path.abspath(schema_path),
         out_path=os.path.abspath(out_path),
         model=model,
+        codex_path=codex_path,
     )
     contract = (
         plan_contract(baseline, fingerprint_pre, plan_paths)
@@ -1319,6 +1325,8 @@ def run_review(
     cli_present = True
     stdout_text = ""
     stderr_text = ""
+    process_error = ""
+    after_snapshot = None
 
     try:
         cp = _execute_review_subprocess(cmd_with_prompt, timeout=timeout, runner=runner)
@@ -1333,6 +1341,14 @@ def run_review(
         stderr_text = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
     except KeyboardInterrupt:
         cancelled = True
+    except OSError as exc:
+        process_error = str(exc)
+        stderr_text = str(exc)
+    finally:
+        # Measure the process interval even when launch/communication fails.
+        # QuotaObserver.after() is fail-soft and cannot replace the transport
+        # exception or outcome.
+        after_snapshot = quota_observer.after() if quota_observer else None
     finished = now()
     duration = time.monotonic() - t0
 
@@ -1350,14 +1366,14 @@ def run_review(
     codex_version = ""
     try:
         vcp = runner(
-            ["codex", "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [codex_path, "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL
         )
         codex_version = ((vcp.stdout or "") + (vcp.stderr or "")).strip().splitlines()[0]
     except Exception:
         pass
 
     verdict: dict[str, Any] | None = None
-    diagnostics = ""
+    diagnostics = process_error
     receipt: dict[str, Any] = {
         "outcome": outcome,
         "verdict": None,
@@ -1451,7 +1467,6 @@ def run_review(
     # Phase 6: capture the bounded after-snapshot and attach a NON-authoritative
     # observation summary to the receipt. Raw candidate data is never embedded;
     # the full pseudonymized record lives only in the JSONL store.
-    after_snapshot = quota_observer.after() if quota_observer else None
     if quota_observer:
         receipt["observation"] = {
             "non_authoritative": True,
@@ -1470,7 +1485,7 @@ def run_review(
             if os.path.isfile(schema_path) else None,
             "doctor_receipt_digest": file_digest(doctor_receipt)
             if doctor_receipt and os.path.isfile(doctor_receipt) else None,
-            "codex_path": shutil.which("codex") or "codex",
+            "codex_path": codex_path,
             "codex_version": codex_version or None,
             "model": model,
             "review_kind": review_kind,
@@ -1550,7 +1565,7 @@ def _build_observer(args: argparse.Namespace) -> QuotaObserver | None:
                 file=sys.stderr,
             )
             return None
-    codex_path = shutil.which("codex") or "codex"
+    codex_path = getattr(args, "codex_path", None) or shutil.which("codex") or "codex"
     codex_home = os.environ.get("CODEX_HOME")
     return QuotaObserver(
         codex_path=codex_path, codex_home=codex_home, model=args.model,
@@ -1605,9 +1620,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="per-read quota timeout (default 5s, hard max 15s)")
 
     args = parser.parse_args(argv)
+    resolved_codex = shutil.which("codex") or "codex"
+    args.codex_path = os.path.abspath(resolved_codex) if os.path.sep in resolved_codex else resolved_codex
 
     if args.command == "preflight":
-        ok, failures = preflight(worktree=args.worktree, schema_path=args.schema)
+        ok, failures = preflight(
+            codex_path=args.codex_path, worktree=args.worktree,
+            schema_path=args.schema,
+        )
         if ok:
             print("preflight: OK")
             return 0
@@ -1621,6 +1641,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         passed, receipt = run_doctor(
             worktree=args.worktree, schema_path=args.schema, receipt_path=args.receipt,
             timeout=args.timeout, model=args.model, quota_observer=observer,
+            codex_path=args.codex_path,
         )
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return EX_OK if passed else EX_PREFLIGHT_FAILED
@@ -1647,7 +1668,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EX_INPUT_INVALID
 
     doctor_errors = verify_doctor_receipt(
-        args.doctor_receipt, schema_path=args.schema, model=args.model
+        args.doctor_receipt, schema_path=args.schema, model=args.model,
+        codex_path=args.codex_path,
     )
     if doctor_errors:
         return _emit(ReviewResult(
@@ -1672,6 +1694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             doctor_receipt=args.doctor_receipt,
             review_phase=args.review_phase,
             quota_observer=_build_observer(args),
+            codex_path=args.codex_path,
         )
     except RuntimeError as exc:
         outcome = "git_identity_failed" if any(
