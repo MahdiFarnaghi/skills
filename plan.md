@@ -1,479 +1,257 @@
 <!-- /autoplan restore point: /Users/m.farnaghi/.gstack/projects/MahdiFarnaghi-skills/main-autoplan-restore-phase4-20260812-224941.md -->
 
-# Phase 6 — Weekly Codex quota admission gate
+# Phase 6 — Quota observation milestone (transport v2)
 
-## Outcome
+> **REFRAMED 2026-08-13 (autoplan user decision).** The original machine-enforced
+> admission-gate design — fail-closed gating, reservations, single-use receipts,
+> emergency SIGINT at 80%, durable blocked-state + resumption — is **superseded**.
+> An autoplan review (Codex reviewing its own quota surface + two independent
+> subagents; see "Phase 6 — Autoplan review" below) established that the quota RPC
+> is an experimental v2-only surface, `windowDurationMins == 10080` is an
+> unverified guess, `usedPercent` is a coarse integer, and the "preserve 20%"
+> invariant is unenforceable (no machine-wide admission lock). Phase 6 is now
+> **observation-only**. The superseded machine-enforcement specification has been
+> removed from the active plan; its history remains available in Git.
+> **This reframe is planning evidence, not an implementation approval — building
+> this milestone requires a separate go-ahead.**
 
-Add machine-enforced quota admission control to the automated Codex review
-transport created in Phase 5. Before every contact with Codex—plan challenge,
-milestone review, correction re-review, and final integration review—the wrapper
-must obtain a fresh machine-readable weekly usage reading, preserve at least 20%
-of the weekly allowance, and refuse to launch a review that could reasonably
-consume that reserve.
+## Outcome (observation-only)
 
-Quota protection is part of the orchestration core, not an informational warning
-or optional prompt. The normal path must not ask the user whether to ignore a
-failed quota check. A blocked review preserves implementation and verification
-state, produces no review verdict, and transitions to a resumable blocked state
-until the quota resets or an explicit operator policy change is recorded.
+Instrument the Phase 5 transport to record pseudonymized quota snapshots before and
+after each Codex review invocation, purely for observation. Quota data is never
+load-bearing: missing, ambiguous, stale, or incompatible quota data must never
+block, cancel, retry, or otherwise alter a review. After a 2–4 week observation
+window and representative invocation sample, evaluate whether even an advisory
+warning is justified — and only then propose it as a separate change. The
+observation window closes after **at least 28 days and at least 30 completed
+doctor/review intervals**, spanning both review kinds and every model used in
+normal operation. When those conditions are first satisfied, the transport
+automatically produces an evaluation report; the user is not required to collect,
+aggregate, or interpret raw observation records manually.
 
-Phase 6 is complete only when every Codex launch is guarded by fresh admission
-control, the gate is conservative under delayed accounting and expensive turns,
-and deterministic tests prove that missing, stale, ambiguous, malformed, or
-over-budget quota data cannot start Codex or satisfy a review gate.
+## Hard constraints (invariants)
 
-## Policy
+1. **Observation-only.** A quota snapshot is metadata attached to a review. It can
+   never gate, block, cancel, defer, retry, or reorder a review.
+2. **Fail-soft, never fail-closed.** If the quota signal is missing, ambiguous,
+   malformed, version-incompatible, or the read errors, record `snapshot=none`
+   with a short reason and proceed identically. No review outcome may differ
+   because of quota data.
+3. **No gating machinery.** Do not add admission gating, capacity reservations,
+   single-use receipts, emergency SIGINT termination, a durable blocked-state
+   machine, or resumption logic. The superseded Workstreams 1–6 do not apply.
+4. **Secrets stay private.** Persist only normalized observational fields; never
+   credentials or raw account payloads. Account correlation uses a stable local
+   pseudonym (a salted SHA-256 digest); never persist raw `orgId`, `accountId`,
+   `email`, `plan`, tokens, headers, or endpoint credentials.
+5. **Clean process lifecycle.** The snapshot reader's `codex app-server` spawn uses
+   a bounded timeout and terminates the whole process group (`os.killpg`) — never
+   orphaned. (This fix also backports to Phase 5's existing timeout path.)
+6. **Reader/reviewer consistency.** Resolve the Codex executable once to an
+   absolute path and pass it to the quota reader, doctor, and reviewer. Reuse the
+   same `CODEX_HOME`, profile/config environment, model, endpoint settings, and
+   transport-v2 doctor receipt. The reader never searches `PATH` independently.
+   Record the server-returned account only as the stable local pseudonym.
+7. **Observation has a strict latency budget.** Each quota read has a small,
+   configurable timeout independent of the review timeout: default 5 seconds per
+   snapshot, maximum configurable value 15 seconds. Eligibility checks and report
+   generation use the same 5-second default / 15-second maximum budget.
+   Observation may add bounded latency, but cannot change review scheduling,
+   outcome, exit status, verdict, correction count, or ledger status.
+8. **Evaluation is automated, policy is not.** Once the sampling threshold is
+   satisfied, automatically generate an idempotent evidence report and mark it
+   `decision_required`. The report may recommend `no_action_warranted`,
+   `continue_observation`, or `consider_advisory`, but it must never enable a
+   warning, change thresholds, or alter review behavior without a separate user
+   decision and implementation change.
 
-Use separate thresholds for admission and emergency interruption:
+## What to record (per review, when the signal is available)
 
-```text
-weekly usage below 75%   -> admit an ordinary review
-weekly usage 75% to 80% -> admit only when a conservative reservation fits
-weekly usage at/above 80% -> block all new mandatory Codex reviews
-active review reaches 80% -> interrupt as an emergency safeguard
-```
+Before the review starts and again after it finishes, attempt one bounded quota
+read and record:
 
-The 20% reserve corresponds to a hard maximum of 80% weekly usage. Do not wait
-until 80% to admit an unbounded review: server-side accounting may update after
-the active turn has already consumed additional allowance. Default ordinary
-admission to 75%, leaving five percentage points of headroom. Make thresholds
-policy-configurable while preserving these defaults.
+- transport version, schema digest, doctor-receipt digest, absolute CLI path and
+  `codex --version`; model; `review_kind` (`plan` / `milestone`, or `null` for
+  doctor);
+  `review_phase` (`plan_challenge` / `milestone` / `correction` / `final` /
+  `doctor`); review round/milestone id and a unique invocation id;
+- start/end timestamps and wall-clock duration;
+- Phase 5 review outcome and verdict (`null` for doctor);
+- `candidate_limits[]`, with each normalized candidate's pseudonymized identifier,
+  window duration, `resetsAt`, before/after `usedPercent`, and
+  `observed_account_delta_during_interval` (never select “weekly” by assuming
+  `10080`);
+- account pseudonym; before/after snapshot status (`ok` / `unavailable` /
+  `incompatible` / `ambiguous` / `error`).
 
-Model admission as a reservation:
+Each candidate delta is correlation, not attributable review consumption. It is
+`null` if either snapshot is absent/ambiguous, the account pseudonym or candidate
+identity differs, the window changed or reset, or the counter decreased
+unexpectedly. Do not synthesize a single account-wide delta from multiple limits.
 
-```text
-used_percent + estimated_review_cost + uncertainty_margin
-    <= maximum_weekly_used_percent
-```
+Snapshots append as versioned JSON Lines to a configurable absolute path outside
+the target worktree. Create it with mode `0600`; serialize writers with a file
+lock and one atomic record append. Bound and redact diagnostics, rotate or retain
+the log under a documented policy, and never persist raw RPC responses. A unique
+invocation id links the log record, before/after snapshots, Phase 5 receipt, and
+ledger round. The receipt carries the pair as explicitly non-authoritative
+metadata.
 
-Initial defaults:
+Default storage is `<output-dir>/quota-observations.jsonl`; rotate at 10 MiB,
+retain every rotated file for 90 days and always retain at least the five newest
+rotated files, and permit an explicit operator override. Generate one 32-byte
+random pseudonym salt beside the log with mode
+`0600`, reuse it for that observation store, and never copy it into receipts or
+the repository. If the salt cannot be created/read safely, record no account
+pseudonym and continue observation in degraded mode.
 
-- `maximum_weekly_used_percent`: 80;
-- ordinary admission ceiling when no reliable estimate exists: 75;
-- normal review reservation: 2 percentage points;
-- adversarial, cumulative, or final review reservation: 4 percentage points;
-- uncertainty margin: 1 percentage point;
-- maximum age of an admission reading: 30 seconds;
-- emergency monitoring interval: 10–20 seconds when notifications are
-  unavailable.
-
-Treat these reservations as conservative policy, not predictions of exact token
-consumption. Refine estimates only from observed local review history and never
-reduce the protected 20% reserve automatically.
-
-## Usage source and compatibility boundary
-
-Use the Codex app-server's machine-readable account rate-limit interface as the
-initial usage source. The expected JSON-RPC method is:
-
-```text
-account/rateLimits/read
-```
-
-Identify the weekly quota by `windowDurationMins == 10080`, not by assuming that
-`primary` or `secondary` always represents the weekly window. Inspect both the
-top-level `rateLimits` value and entries under `rateLimitsByLimitId` when
-present.
-
-Treat this RPC and response shape as version-sensitive. During implementation:
-
-- record the tested Codex CLI version and observed response schema;
-- perform the required app-server initialize/initialized handshake;
-- validate `usedPercent`, `windowDurationMins`, and `resetsAt`;
-- reject multiple conflicting weekly candidates;
-- reject values outside valid ranges;
-- rerun compatibility tests whenever the Codex CLI version changes;
-- fail closed when the method is missing or the response becomes incompatible.
-
-Do not parse interactive `/usage` or `/status` text. Do not assume an API-account
-RPM or TPM limit represents a ChatGPT Codex weekly allowance.
-
-## Scope
-
-Extend the Phase 5 review wrapper and add focused quota components, for example:
+## Deliverables (transport v2)
 
 ```text
 skills/codex-reviewed-implementation/
 ├── scripts/
-│   ├── run_codex_review.py
-│   ├── read_codex_quota.py
-│   └── test_codex_quota_gate.py
+│   ├── run_codex_review.py               # before/after integration + phase tag
+│   ├── codex_process.py                  # shared process-group lifecycle helper
+│   ├── read_codex_quota.py               # observation-mode reader (no gating)
+│   ├── quota_observation.py              # normalization, delta, JSONL logging
+│   ├── summarize_quota_observations.py   # eligibility + deterministic report
+│   ├── test_codex_quota_snapshot.py
+│   ├── test_quota_observation.py
+│   └── test_quota_observation_report.py
 ├── schemas/
-│   └── codex-quota-reading.schema.json
+│   ├── codex-quota-snapshot.schema.json # observational fields only
+│   └── codex-quota-report.schema.json   # aggregated, non-authoritative report
 └── references/
-    └── codex-quota-policy.md
+    └── codex-quota-observations.md      # what this is + evaluation criteria
 ```
 
-Adjust file names to repository conventions, but keep quota reading,
-admission-policy evaluation, process launch, and result validation as separable,
-deterministic components.
-
-In scope:
-
-- pre-dispatch quota checks before every Codex invocation;
-- capacity reservation and configurable safety margins;
-- weekly-window discovery and schema validation;
-- app-server lifecycle and JSON-RPC correlation;
-- stale, ambiguous, and failed-reading handling;
-- optional update-notification monitoring with polling fallback;
-- emergency active-review interruption;
-- durable blocked-state and reset-time reporting;
-- tests for admission, blocking, compatibility, cleanup, and recovery.
-
-Out of scope:
-
-- guaranteeing an exact remaining percentage despite delayed server accounting;
-- bypassing or modifying OpenAI usage limits;
-- globally aliasing or replacing the user's `codex` executable;
-- using quota failure as permission to skip mandatory review;
-- silently switching accounts, models, authentication methods, or paid API usage;
-- exposing authentication tokens or complete account responses in logs;
-- treating an interrupted partial review as evidence.
-
-## Global invariants
-
-1. **Check before every launch.** A workflow-start check cannot authorize later
-   correction or final reviews. Each Codex process requires a fresh reading.
-2. **Reserve before spending.** Admission includes estimated review cost and an
-   uncertainty margin; current usage below 80% is not sufficient by itself.
-3. **Preserve 20%.** No policy default may intentionally admit work expected to
-   exceed 80% weekly usage.
-4. **Fail closed.** Missing, stale, malformed, conflicting, or unreadable quota
-   data prevents mandatory review launch.
-5. **No verdict on quota failure.** Quota blocking and interruption never count
-   as review attempts, correction rounds, approvals, or rejections.
-6. **One real Codex executable.** Resolve the executable explicitly. Do not use a
-   global alias that could recurse when launching `codex app-server`.
-7. **At-most-once launch.** Retrying a quota read must not launch duplicate
-   reviewers. Record admission before process creation and correlate it with one
-   review attempt.
-8. **Partial output is invalid.** Emergency interruption discards the entire
-   review response and records `quota_interrupted`.
-9. **Secrets stay private.** Persist normalized quota fields and diagnostics,
-   never credentials or unredacted account payloads.
-10. **Block without destroying work.** Quota exhaustion preserves the worktree,
-    evidence, packets, and orchestration state for resumption after reset.
-11. **Manual override is explicit policy.** Only the operator may alter the
-    reserve policy. Claude cannot infer, issue, or silently request an override.
-12. **Usage estimates never authorize acceptance.** The quota system controls
-    process admission only; it does not replace independent review evidence.
-
-## Gate outcomes
-
-Use a closed machine-readable outcome enum:
-
-```text
-ALLOW
-QUOTA_BLOCKED
-QUOTA_UNKNOWN
-QUOTA_STALE
-QUOTA_AMBIGUOUS
-QUOTA_READ_FAILED
-QUOTA_UNSUPPORTED
-QUOTA_INTERRUPTED
-```
-
-An `ALLOW` receipt must contain:
-
-- Codex CLI version;
-- account/limit identifier when safely available;
-- weekly `usedPercent` and computed remaining percentage;
-- weekly window duration and reset time;
-- reading timestamp and age;
-- review class and reservation estimate;
-- uncertainty margin and policy version;
-- admission threshold and decision;
-- correlated review attempt ID.
-
-Any non-`ALLOW` result produces no Codex process unless it is an emergency
-outcome generated for a process already running.
-
-## Delivery sequence
-
-## 1. Define the quota policy and schemas
-
-### Objective
-
-Create a versioned, deterministic contract for quota readings, admission
-decisions, reservations, blocked state, and emergency interruption.
-
-### Work
-
-1. Define a quota-reading schema with strict types, ranges, timestamps, source,
-   CLI version, window duration, reset time, and normalized limit identity.
-2. Define a policy schema containing reserve, admission ceiling, review-class
-   reservations, uncertainty margin, freshness, monitor interval, and failure
-   behavior.
-3. Define an admission-receipt schema bound to one review attempt and Phase 5
-   target identity.
-4. Define invalidation: a receipt expires before process launch, cannot authorize
-   another review, and cannot survive account, CLI version, policy, target, or
-   review-class changes.
-5. Define operator override representation with actor, timestamp, reason, exact
-   scope, previous policy, replacement policy, and expiration. The model cannot
-   author a valid override.
-
-### Exit criteria
-
-- schemas reject invalid percentages, durations, timestamps, thresholds, and
-  contradictory decisions;
-- an `ALLOW` receipt is single-use and review-attempt-bound;
-- no non-`ALLOW` result can satisfy launch authorization;
-- policy defaults preserve the 20% reserve with headroom.
-
-## 2. Implement the quota reader
-
-### Objective
-
-Obtain one validated weekly usage reading without starting a review process.
-
-### Work
-
-1. Start `codex app-server` using an argument vector and explicit executable.
-2. Complete the JSON-RPC initialization handshake with bounded timeouts.
-3. send `account/rateLimits/read` with a unique request ID.
-4. Ignore unrelated notifications while preserving request correlation.
-5. Inspect all returned rate-limit buckets and identify weekly candidates by the
-   exact 10080-minute duration.
-6. Reject zero candidates, multiple conflicting candidates, malformed data,
-   server errors, EOF, and timeout.
-7. Normalize only the required fields and terminate the app-server cleanly.
-8. Keep stderr for bounded diagnostics without exposing secrets.
-9. Optionally support reuse of one healthy app-server process within a single
-   review wrapper invocation, but do not leave an orphaned global process.
-
-### Exit criteria
-
-- valid legacy and multi-limit response fixtures normalize correctly;
-- asynchronous notifications do not corrupt response matching;
-- malformed, missing, and conflicting weekly windows fail closed;
-- handshake, read, and shutdown are independently time-bounded;
-- no app-server process remains after success or failure.
-
-## 3. Implement admission and reservation
-
-### Objective
-
-Decide whether one specific Codex review can safely start while protecting the
-weekly reserve.
-
-### Work
-
-1. Classify the requested review as normal, adversarial, cumulative, correction,
-   or final integration.
-2. Select a conservative reservation from policy. Use the larger applicable
-   class when classifications overlap.
-3. Calculate:
-
-   ```text
-   projected_used = used_percent + reservation + uncertainty_margin
-   ```
-
-4. Return `ALLOW` only when `projected_used <= 80` and the current reading is
-   below the applicable admission ceiling.
-5. When no reliable cost estimate exists, enforce the 75% admission ceiling.
-6. Record the decision atomically before spawning Codex.
-7. Revalidate receipt freshness immediately before process creation.
-8. Do not automatically lower review quality or change models to fit the budget.
-   Any such policy requires explicit operator design and separate validation.
-
-### Exit criteria
-
-- boundary cases at 74.9%, 75%, 79.9%, and 80% behave deterministically;
-- large reservations block earlier than small reservations;
-- stale receipts cannot launch reviews;
-- admission retries cannot create duplicate processes.
-
-## 4. Integrate the gate into every Codex contact
-
-### Objective
-
-Make quota admission an unavoidable prerequisite of the Phase 5 wrapper.
-
-### Work
-
-1. Place the gate inside `run_codex_review.py` immediately before spawning
-   Codex, not only in `SKILL.md` instructions.
-2. Require a valid single-use `ALLOW` receipt for plan, milestone, correction,
-   and final integration reviews.
-3. Bind the receipt to the review attempt, worktree, target manifest, packet
-   digest, review class, policy version, and executable version.
-4. On blocking outcome:
-   - do not launch Codex;
-   - preserve the validated review packet and verification evidence;
-   - record reset time and exact reason;
-   - enter a resumable `TRANSPORT_BLOCKED` or `QUOTA_BLOCKED` state;
-   - report that no review verdict occurred.
-5. After reset, require a new reading and receipt. Never reuse the pre-reset
-   admission decision.
-6. Ensure quota blocking does not consume a correction-round allowance.
-
-### Exit criteria
-
-- no wrapper path can launch Codex without a valid receipt;
-- all four review boundaries are covered;
-- blocked state resumes safely after a new admission decision;
-- no manual review command is offered as an automatic bypass.
-
-## 5. Add emergency active-review protection
-
-### Objective
-
-Reduce overshoot when a review admitted below the threshold becomes unusually
-expensive.
-
-### Work
-
-1. Prefer `account/rateLimits/updated` notifications when the tested app-server
-   supports them reliably.
-2. Use bounded 10–20 second polling only as fallback.
-3. At or above 80% weekly usage:
-   - send `SIGINT` to the active Codex review;
-   - wait a bounded grace period;
-   - terminate the process if it remains active;
-   - confirm process exit;
-   - discard partial stdout and structured output;
-   - record `QUOTA_INTERRUPTED` and no verdict.
-4. If monitoring itself fails while protecting a mandatory reserve, interrupt
-   the review rather than continuing blind.
-5. Keep emergency monitoring secondary to conservative admission. Do not claim
-   it mathematically guarantees exactly 20% remaining.
-
-### Exit criteria
-
-- a simulated threshold crossing interrupts and invalidates the review;
-- graceful and forced termination paths leave no child process;
-- partial JSON cannot pass schema validation or satisfy a gate;
-- monitor failure follows the configured fail-closed policy.
-
-## 6. Add durable blocking and resumption
-
-### Objective
-
-Pause automation safely when quota is protected and resume without repeating
-completed implementation work.
-
-### Work
-
-1. Persist the normalized blocking outcome, reset time, worktree and target
-   identity, packet digest, verification state, and pending review class.
-2. Do not mark the milestone failed or approved.
-3. Do not rerun implementation or verification unless the target changed or the
-   evidence expired under Phase 5 policy.
-4. On resumption, reconcile current repository state with the stored target.
-5. If unchanged, obtain a new quota reading and continue at review admission.
-6. If changed, invalidate stale packet and evidence as required and return to the
-   appropriate earlier state.
-7. Notify the user once with remaining percentage, reset time, blocked review,
-   and preserved state. Do not repeatedly poll or send unchanged notifications.
-
-### Exit criteria
-
-- quota exhaustion cannot lose implementation or finding state;
-- resumption neither duplicates corrections nor skips review;
-- target mutation while blocked invalidates stale evidence;
-- unchanged blocked state does not create noisy repeated updates.
-
-## 7. Test quota enforcement
-
-### Unit and contract tests
-
-Test:
-
-- app-server initialization and initialized handshake;
-- request-ID correlation amid notifications;
-- top-level and `rateLimitsByLimitId` response shapes;
-- weekly discovery by 10080-minute duration;
-- absent, duplicate, conflicting, and malformed weekly windows;
-- valid percentage boundaries and reset times;
-- freshness and stale readings;
-- policy and reservation calculations;
-- review-class mapping;
-- single-use receipts;
-- executable, policy, target, and packet mismatch;
-- blocked-state serialization and resumption;
-- redaction of credentials and raw account data.
-
-### Process tests
-
-Test:
-
-- app-server timeout, EOF, error, and cleanup;
-- no Codex launch on every non-`ALLOW` outcome;
-- exactly one launch on a valid receipt;
-- no duplicate launch after retry or restart;
-- emergency SIGINT, forced termination, and orphan cleanup;
-- partial-output rejection;
-- monitor failure behavior.
-
-### End-to-end tests
-
-1. A review below 75% runs normally.
-2. A reservation that would cross 80% is blocked before launch.
-3. A reading at 80% is blocked.
-4. A missing or incompatible quota RPC fails closed.
-5. A correction loop checks quota again before re-review.
-6. A final integration review uses the larger reservation.
-7. A simulated active threshold crossing interrupts with no verdict.
-8. After reset, unchanged work resumes at review without reimplementation.
-9. Changed work while blocked invalidates the old packet and receipt.
-10. The full Phase 5 automation still requires no user relay below the quota
-    threshold.
-
-Use mocked app-server fixtures for deterministic tests. Run a live read-only
-quota probe only with user authorization, and do not intentionally consume quota
-to test threshold crossings.
-
-## 8. Reconcile documentation and operations
-
-### Objective
-
-Make quota behavior predictable, configurable, and truthful.
-
-### Work
-
-1. Document threshold semantics in terms of `usedPercent`, including the
-   difference between the 75% admission ceiling and 80% protected-reserve limit.
-2. State explicitly that delayed server accounting prevents a mathematical
-   guarantee of exactly 20% remaining.
-3. Document each gate outcome, blocked-state behavior, reset resumption, and
-   operator override policy.
-4. Document the tested Codex CLI version and response shape.
-5. Document why global `alias codex=...` is prohibited.
-6. Document that API RPM/TPM limits and ChatGPT weekly Codex usage are different
-   concepts.
-7. Keep detailed RPC and schema mechanics in references; keep the core skill
-   focused on when to check, block, resume, and escalate.
-
-### Exit criteria
-
-- users can predict when automation will stop and resume;
-- no documentation promises an exact reserve guarantee;
-- overrides are explicit, scoped, expiring, and operator-authored;
-- Phase 5 and Phase 6 describe one consistent automated workflow.
-
-## Final acceptance criteria
-
-- every Codex plan, milestone, correction, and final review performs a fresh
-  quota admission check immediately before launch;
-- the default policy protects a 20% weekly reserve with a 75% ordinary admission
-  ceiling and conservative reservations;
-- the weekly bucket is identified by a validated 10080-minute window rather than
-  a fixed primary/secondary assumption;
-- missing, stale, malformed, conflicting, or unsupported quota data fails closed;
-- an admission receipt is single-use and bound to the exact Phase 5 review
-  attempt, worktree, target, packet, class, policy, and executable version;
-- quota blocking launches no Codex process and produces no review verdict;
-- correction counts are unaffected by quota blocking;
-- emergency interruption discards partial output and leaves no orphan process;
-- blocked state preserves work and resumes safely after reset;
-- no global Codex alias, account switch, model downgrade, paid-API fallback, or
-  manual review bypass occurs silently;
-- deterministic unit, process, and end-to-end tests pass;
-- the documentation states that the reserve is conservative but not
-  mathematically exact because usage accounting may lag an active turn.
-
----
+Wire before/after snapshot capture into `run_codex_review.py` around the existing
+review launch. Instrument `doctor` as `review_phase=doctor` as well as normal
+reviews so its usage is not omitted. For a newly claimed review round:
+
+1. attempt the bounded before-snapshot after `claim_round`;
+2. always launch the review after that attempt;
+3. finalize the original review outcome independently;
+4. attempt the bounded after-snapshot from `finally` for success, process failure,
+   timeout, cancellation, and invalid output;
+5. append/attach observation metadata without changing the original outcome.
+
+The replay short-circuit performs no quota reads. Observation exceptions and log
+failures are caught, redacted, and swallowed. Receipt or ledger failures retain
+their existing transport-v2 semantics and are never reclassified as observation
+failures.
+
+Add a required wrapper `--review-phase` selector with the closed values above.
+Keep the existing structured verdict's `review_kind` unchanged (`plan` or
+`milestone`); phase is receipt/observation metadata and must never be sent as a
+new verdict kind. Validate combinations (`plan_challenge` requires `plan`;
+`milestone`, `correction`, and `final` require `milestone`; `doctor` is emitted
+only by `doctor` and has no verdict or review kind).
+
+The reader records all normalized candidate limits and does not choose a
+"relevant" or "weekly" limit. It marks a snapshot `ambiguous` only when candidate
+identity is missing, duplicated, or otherwise insufficient for stable matching;
+selection heuristics such as `windowDurationMins == 10080` are forbidden. Only
+matching candidate identifiers may be compared across snapshots.
+
+Treat process-group cleanup as a small transport-hardening prerequisite, not
+quota policy: use `Popen(start_new_session=True)`, and on timeout/cancellation
+signal the process group, allow a bounded grace period, then kill and reap the
+whole group. Apply and test the same cleanup helper in the existing review and
+doctor timeout paths.
+
+## Implementation acceptance criteria
+
+Before starting the observation window, prove all of the following:
+
+1. Missing app-server, missing RPC, malformed JSON-RPC, incompatible protocol,
+   ambiguous limits, and reader timeout leave review behavior and exit status
+   unchanged.
+2. The reader and reviewer use the same resolved executable, configuration
+   environment, endpoint settings, model, and matching doctor receipt.
+3. Raw secrets and account fields never appear in logs, reports, receipts,
+   stdout, or stderr; only the stable salted account pseudonym is persisted.
+4. Multiple limits are normalized without guessing which is weekly. Account,
+   limit, window, or reset mismatch yields a null observed delta.
+5. Success, process failure, timeout, cancellation, invalid output, and doctor
+   calls produce correctly classified observation records; replay produces none.
+6. Concurrent writers cannot corrupt or interleave JSONL records; log creation is
+   `0600`, diagnostics are bounded/redacted, and retention/rotation is documented.
+7. Reader/reviewer timeout tests prove the entire process group is terminated and
+   reaped with no orphan descendants.
+8. Observation never alters target fingerprints, verdict validation, correction
+   counts, ledger state, transport outcome, or the original process exit code.
+9. Existing transport-v2 tests remain green, and focused unit/process tests cover
+   normalization, pseudonymization, delta rules, logging, and all failure paths.
+10. The default 5-second and maximum 15-second observation budgets, 10 MiB log
+    rotation, 90-day retention with a five-newest-file floor, salt permissions,
+    and review-phase combination rules are enforced by tests rather than
+    documentation alone.
+11. Crossing the sampling threshold automatically creates exactly one current,
+    schema-valid report for the observation-store generation. Repeated or
+    concurrent checks are idempotent; incomplete samples produce
+    `continue_observation`; corrupt records are counted and skipped; report
+    failure is retried later and never changes a review result.
+
+## Evaluation criteria (after the observation window)
+
+After each successful observation append, perform a bounded eligibility check.
+Before eligibility, do not emit a final report; retain an internal
+`continue_observation` status with the unmet day, interval, review-kind, or model
+coverage conditions. Once eligible, atomically write versioned JSON and a concise
+Markdown rendering beside the observation log, both mode `0600`. Bind the report
+to the observation-store id, schema version, covered time range, input-record
+count, and a digest of the processed record set. Regeneration with the same digest
+must be a no-op; newly eligible data may replace the current report atomically
+while preserving the previous report under the log-retention policy. After the
+first eligible report, regenerate at most once per 24 hours unless explicitly
+requested; a failed or timed-out generation remains retryable on the next append.
+
+The report generator reads only normalized JSONL records and automatically
+computes:
+
+- coverage by day, review kind, review phase, model, and outcome;
+- valid, unavailable, incompatible, ambiguous, error, and corrupt-record counts;
+- every observed candidate-limit shape and its stability across snapshots;
+- reset/window/account mismatch counts and the proportion of null deltas;
+- `usedPercent` distributions, maxima, and counts at or above 60% and 70%;
+- per-candidate delta distributions grouped by review kind, phase, and model,
+  explicitly labelled as interval correlation rather than attributed usage.
+
+Produce one deterministic recommendation:
+
+- `continue_observation` when the minimum window/sample/coverage requirements are
+  unmet;
+- `consider_advisory` once eligible when, for the same stable candidate identity,
+  at least three distinct completed intervals reach `usedPercent >= 70`, or at
+  least 20% of intervals in which that candidate is valid reach
+  `usedPercent >= 60`;
+- `no_action_warranted` for every other eligible sample, including an absent or
+  unusable signal.
+
+Count each interval at most once per threshold even if several candidates cross
+it. The report must state the exact, configurable recommendation rule it applied
+and show its numerator, denominator, and supporting interval ids; defaults and
+any later rule change are versioned. Changing the rule requires explicit operator
+configuration and creates a new report-policy version—it never changes review
+runtime behavior.
+Regardless of recommendation, its terminal workflow status is
+`decision_required`: it is evidence for a separate product decision, not
+authorization to modify runtime policy.
+
+Before proposing any advisory warning (a separate phase), use the generated report
+to answer:
+
+1. Does usage ever approach the cap (e.g., recurring `usedPercent >= 60–70`)?
+2. Is the weekly-window signal actually present and stable enough to support even
+   an advisory? Resolve the `10080` question empirically from observed data.
+3. What is the observed account-delta distribution during invocation intervals,
+   grouped by review kind, phase, and model, without claiming causal attribution?
+4. Is an advisory warning justified, or is the whole concern unnecessary?
+
+If the report recommends `no_action_warranted`, the user may close Phase 6 with
+the report and observation log as evidence. `consider_advisory` may only open a
+separately approved planning phase; it cannot modify this transport in place.
 
 ## Phase 6 — Autoplan review (2026-08-13, codex-cli surface probed)
 
@@ -502,6 +280,13 @@ enforced.**
   none accounted for. Reset credits can shorten the wait the blocked-state reports.
 - Codex (inside its own sandbox) reported its version as `0.137.0`; the subagent
   saw `0.146.0`. The `codex` version itself is ambiguous across contexts.
+
+**Resolution for implementation:** treat the 0.146.0 probe as historical evidence
+from a different executable context. At the time of the transport-v2 doctor,
+the canonical shell executable was `/opt/homebrew/bin/codex` at 0.137.0 and the
+model-bound doctor passed with `gpt-5.4`. Implementation must resolve this again
+from the wrapper-selected absolute executable and matching doctor receipt; it
+must not reuse the historical 0.146.0 probe as the runtime identity.
 
 ### Consensus table
 
@@ -549,7 +334,7 @@ the wrapper enforces a backend reserve.
 
 | # | Decision | Class | Principle | Disposition |
 |---|----------|-------|-----------|-------------|
-| 1 | Reframe machine-enforced gate → advisory preflight | **USER CHALLENGE** (2/3 models) | P1/P3 | SURFACED at gate |
+| 1 | Reframe machine-enforced gate → observation-only milestone | **USER CHALLENGE → DECIDED** (user, 2026-08-13) | P1/P3 | ADOPTED (option 3): observe only, never gate |
 | 2 | Drop `10080` rule → live-probe weekly detection | Mechanical (Critical) | P5 | Auto-decided: verify empirically |
 | 3 | Drop fractional boundary tests → integer-only | Mechanical | P5 | Auto-decided: adopt |
 | 4 | Add `killpg` process-group termination | Mechanical (High) | P1 | Auto-decided: adopt if any read built |
@@ -559,9 +344,13 @@ the wrapper enforces a backend reserve.
 | 8 | Drop emergency SIGINT interruption | Taste (High) | P3 | SURFACED at gate |
 | 9 | Instrument usage 2–4 weeks before building | Taste (CEO) | P6 | SURFACED at gate |
 
-**Status: AWAITING PREMISE / USER-CHALLENGE DECISION.** DX and failure-modes
-sections deferred — contingent on whether Phase 6 stays machine-enforced or
-reframes to advisory.
+**Status: DECISION RECORDED (2026-08-13).** User selected the observation-only
+reframe: Phase 6 becomes a quota **observation** milestone — record before/after
+snapshots per review; quota data never blocks/cancels/alters a review; no
+admission gating, reservations, SIGINT, or durable blocked-state; evaluate after
+2–4 weeks whether an advisory warning is even justified. The machine-enforced
+design is superseded. This autoplan review is planning evidence, **not** a Phase 6
+implementation approval.
 
 # Phase 5 — Automate `codex-reviewed-implementation` through the Codex CLI [done]
 
