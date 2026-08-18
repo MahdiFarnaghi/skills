@@ -1298,17 +1298,18 @@ def test_init_config_without_model_fails_fast_non_interactive(tmp_path, capsys):
     assert not (wt / ".codex-review.toml").exists()
 
 
-def test_init_config_refuses_overwrite_then_force(tmp_path, capsys):
+def test_init_config_idempotent_then_conflict_then_force(tmp_path, capsys):
     wt = tmp_path / "wt"; wt.mkdir()
     argv = ["init-config", "--worktree", str(wt), "--model", "gpt-5.6-luna"]
     assert rcr.main(argv) == 0
     capsys.readouterr()  # drain success output
-    again = rcr.main(argv)
-    assert again == rcr.EX_CONFIG_ERROR
+    assert rcr.main(argv) == 0  # SAME policy: documented idempotent no-op
+    conflicting = ["init-config", "--worktree", str(wt), "--model", "gpt-5.6-terra"]
+    assert rcr.main(conflicting) == rcr.EX_CONFIG_ERROR
     captured = capsys.readouterr()
     assert "--force" in captured.out + captured.err
-    assert rcr.main([*argv, "--force"]) == 0
-    assert 'model = "gpt-5.6-luna"' in (wt / ".codex-review.toml").read_text()
+    assert rcr.main([*conflicting, "--force"]) == 0
+    assert 'model = "gpt-5.6-terra"' in (wt / ".codex-review.toml").read_text()
 
 
 def test_validate_config_prints_resolved_profile_and_level(tmp_path, capsys):

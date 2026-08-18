@@ -221,6 +221,10 @@ class ExecutionProfile:
     config_version: int | str  # file version, or the "none" sentinel
     resolution_source: str  # cli_flag | project_config | user_config | cli_default
     native_model_pin: str | None = None
+    #: Fail-soft user ``config.toml`` ``model_reasoning_effort`` value, bound
+    #: when no flag/config overrides effort (same drift class as the model
+    #: pin). ``None`` when effort is explicitly pinned or unreadable.
+    native_effort_pin: str | None = None
 
     def __post_init__(self) -> None:
         # Normalize the cli-default sentinel: identical execution → identical
@@ -237,6 +241,7 @@ class ExecutionProfile:
                 "codex_profile": self.codex_profile,
                 "config_version": self.config_version,
                 "native_model_pin": self.native_model_pin,
+                "native_effort_pin": self.native_effort_pin,
             },
             sort_keys=True,
         )
@@ -252,6 +257,7 @@ class ExecutionProfile:
             "config_version": self.config_version,
             "resolution_source": self.resolution_source,
             "native_model_pin": self.native_model_pin,
+            "native_effort_pin": self.native_effort_pin,
             "profile_digest": self.digest,
         }
 
@@ -273,6 +279,19 @@ def _read_user_model_pin(codex_home: str | None) -> str | None:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
     pin = data.get("model")
+    return pin if isinstance(pin, str) and pin else None
+
+
+def _read_user_effort_pin(codex_home: str | None) -> str | None:
+    """Fail-soft read of the user's ``config.toml`` reasoning-effort pin
+    (bound into the identity when nothing overrides it — same drift class
+    as the model pin)."""
+    home = Path(codex_home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    try:
+        data = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    pin = data.get("model_reasoning_effort")
     return pin if isinstance(pin, str) and pin else None
 
 
@@ -323,10 +342,23 @@ def resolve_profile(
             config = load_config(path)  # loud on malformed
             config_version = config["version"]  # load_config guarantees int 1
 
-    # Read the user pin once. It is bound into the identity only when it IS
-    # the effective model (no -m and no project model) — otherwise it would
-    # invalidate receipts for runs it never affected.
+    # Read the native pins once. Each is bound into the identity only when it
+    # IS the effective value (nothing overrides it) — otherwise it would
+    # invalidate receipts for runs it never affected. `cli-default` and a
+    # project `model = "cli-default"` both mean "no -m is passed", so the
+    # native model pin stays effective in those cases too.
     native_pin = _read_user_model_pin(codex_home)
+    native_effort = _read_user_effort_pin(codex_home)
+
+    model_overridden = (
+        (cli_model is not None and cli_model != CLI_DEFAULT)
+        or (config.get("model") is not None and config.get("model") != CLI_DEFAULT)
+    )
+    effort_overridden = (
+        cli_effort is not None or config.get("reasoning_effort") is not None
+    )
+    bound_pin = None if model_overridden else native_pin
+    bound_effort = None if effort_overridden else native_effort
 
     def _checked(profile: ExecutionProfile) -> ExecutionProfile:
         # Stable config errors at the resolution seam (never a traceback from
@@ -347,9 +379,8 @@ def resolve_profile(
             else config.get("codex_profile"),
             config_version=config_version,
             resolution_source="cli_flag",
-            native_model_pin=native_pin if (
-                cli_model is None and not config.get("model")
-            ) else None,
+            native_model_pin=bound_pin,
+            native_effort_pin=bound_effort,
         )
         # require_config gates the MODEL dimension: an effort-only flag must
         # not satisfy it while the model silently rides the native default.
@@ -368,7 +399,8 @@ def resolve_profile(
             codex_profile=config.get("codex_profile"),
             config_version=config_version,
             resolution_source="project_config",
-            native_model_pin=native_pin if not config.get("model") else None,
+            native_model_pin=bound_pin,
+            native_effort_pin=bound_effort,
         ))
 
     if require_config:
@@ -377,12 +409,12 @@ def resolve_profile(
         )
 
     # No pinned policy: record where the effective model comes from, and bind
-    # the pin's VALUE so a later user-config edit cannot ride an old receipt.
+    # the pins' VALUES so a later user-config edit cannot ride an old receipt.
     source = "user_config" if native_pin else "cli_default"
     return ExecutionProfile(
         model=None, reasoning_effort=None, codex_profile=None,
         config_version="none", resolution_source=source,
-        native_model_pin=native_pin,
+        native_model_pin=native_pin, native_effort_pin=native_effort,
     )
 
 
@@ -411,16 +443,32 @@ def write_config(
     write can never land. Refuses to overwrite an existing file without
     ``force``.
     """
+    # Value validation FIRST: an invalid request must error before any
+    # idempotency comparison or existence handling.
+    validate_policy_values(model, reasoning_effort, codex_profile)
     if os.path.exists(path) and not force:
+        # Idempotency contract: re-running init-config with the SAME policy
+        # is a documented no-op success; only a CONFLICTING existing policy
+        # is an error.
+        try:
+            existing = load_config(path)
+        except ConfigError:
+            existing = None
+        requested = {
+            "version": SUPPORTED_CONFIG_VERSION, "model": model,
+            "reasoning_effort": reasoning_effort, "codex_profile": codex_profile,
+        }
+        same = existing is not None and all(
+            existing.get(k) == v for k, v in requested.items()
+        )
+        if same:
+            return  # identical policy already installed: no-op success
         raise ConfigError(
             "E_CONFIG_EXISTS",
-            f"E_CONFIG_EXISTS: config {path} already exists; pass --force to "
-            "replace it (existing project policies are never silently "
-            "overwritten).",
+            f"E_CONFIG_EXISTS: config {path} already exists with a different "
+            "policy; pass --force to replace it (existing project policies "
+            "are never silently overwritten).",
         )
-    # Value validation at the write seam: a bootstrap command must never emit
-    # a config its own loader rejects one command later.
-    validate_policy_values(model, reasoning_effort, codex_profile)
     lines = [f"version = {SUPPORTED_CONFIG_VERSION}", f"model = {_toml_string(model)}"]
     if reasoning_effort is not None:
         lines.append(f"reasoning_effort = {_toml_string(reasoning_effort)}")
@@ -447,12 +495,15 @@ def write_config(
             # Atomic no-overwrite: os.link fails with FileExistsError if a
             # concurrent run installed a config between the existence check
             # and now — the last writer must never silently replace without
-            # --force. (Filesystems without hardlink support fall back to
-            # the non-atomic path; the early existence check still guards
-            # the common case.)
+            # --force. The temp file is removed on EVERY path (a leaked
+            # .codex-review-*.tmp inside the worktree would dirty its
+            # fingerprint). Filesystems without hardlink support fall back
+            # to the non-atomic replace; the early check still guards the
+            # common case.
             try:
                 os.link(tmp, path)
             except FileExistsError:
+                os.unlink(tmp)
                 raise ConfigError(
                     "E_CONFIG_EXISTS",
                     f"E_CONFIG_EXISTS: config {path} already exists; pass "

@@ -2,12 +2,13 @@
 
 Phase 7 makes the review model explicit, recorded, and bound. The core
 object is the **execution profile**: `{model, reasoning_effort, codex_profile,
-config_version, resolution_source, profile_digest}`. It is resolved exactly
-once per invocation, frozen, and stamped into doctor receipts, review
-receipts, loop-state ledger rounds, and quota observations. `profile_digest`
-hashes only execution-affecting fields (model, effort, codex profile, config
-version) — provenance (`resolution_source`) is recorded but never changes
-authorization.
+config_version, resolution_source, native_model_pin, native_effort_pin,
+profile_digest}`. It is resolved exactly once per invocation, frozen, and
+stamped into doctor receipts, review receipts, loop-state ledger rounds, and
+quota observations. `profile_digest` hashes only execution-affecting fields
+(model, effort, codex profile, config version, and the effective native
+model/effort pins — see "Native-binding boundary" below) — provenance
+(`resolution_source`) is recorded but never changes authorization.
 
 Before Phase 7, `--model` defaulted to `None`, so reviews silently ran
 whatever `~/.codex/config.toml` pinned and receipts recorded `model: null`,
@@ -112,3 +113,19 @@ python3 scripts/run_codex_review.py list-models --json [--refresh]
 - `list-models --refresh` output labels its origin honestly: `native`
   (CLI cache), `web` (page-parsed, no CLI compatibility info), `cached`,
   or `none`.
+
+## Native-binding boundary (what the digest does and does not bind)
+
+The profile digest binds the wrapper-controlled policy (model, effort,
+codex profile name, config version) plus the two named native settings that
+silently govern execution when nothing overrides them: the user
+`config.toml` **model pin** and **model_reasoning_effort pin** (read
+fail-soft; bound only when effective, including under `cli-default`).
+
+It deliberately does **not** hash the full `config.toml` or the contents of
+the file a `-p` profile selects: doing so would invalidate every doctor
+receipt on any unrelated user-config edit. Residual risk, accepted and
+documented: a user editing *other* execution-affecting settings inside a
+selected profile file can change what runs without changing the digest.
+Tightening this (e.g., hashing the resolved profile file) is an open design
+question in TODOS.md.

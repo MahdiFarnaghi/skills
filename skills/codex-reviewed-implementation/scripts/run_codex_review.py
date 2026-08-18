@@ -1141,6 +1141,7 @@ def doctor_key(
         "codex_profile": prof.codex_profile,
         "config_version": prof.config_version,
         "native_model_pin": prof.native_model_pin,
+        "native_effort_pin": prof.native_effort_pin,
         "profile_digest": prof.digest,
     }
 

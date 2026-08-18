@@ -265,7 +265,9 @@ def test_resolve_rejects_bad_codex_profile_stably(tmp_path):
 
 def test_write_config_atomic_no_overwrite_under_race(tmp_path, monkeypatch):
     # Even if the early existence check is fooled (racy concurrent run), the
-    # atomic link step must still refuse to replace without --force.
+    # atomic link step must still refuse to replace without --force — AND
+    # must not leak a temp file into the worktree (it would dirty the
+    # target fingerprint).
     path = str(tmp_path / ".codex-review.toml")
     cmc.write_config(path, model="gpt-5.6-luna")
     monkeypatch.setattr(os.path, "exists", lambda p: False)  # simulate the race
@@ -274,8 +276,49 @@ def test_write_config_atomic_no_overwrite_under_race(tmp_path, monkeypatch):
     except cmc.ConfigError as exc:
         assert "E_CONFIG_EXISTS" in str(exc)
         assert cmc.load_config(path)["model"] == "gpt-5.6-luna"  # untouched
+        assert not list(Path(path).parent.glob(".codex-review-*.tmp"))  # no leak
         return
     raise AssertionError("expected E_CONFIG_EXISTS despite fooled existence check")
+
+
+def test_resolve_cli_default_keeps_native_pin_bound(tmp_path):
+    # --model cli-default passes NO -m, so the user config's model stays the
+    # effective model: its pin must remain bound (changing it later must
+    # invalidate the receipt), even though the sentinel was explicitly chosen.
+    def _home(name, pin):
+        h = tmp_path / name; h.mkdir()
+        (h / "config.toml").write_text(f'model = "{pin}"\n', encoding="utf-8")
+        return str(h)
+
+    a = cmc.resolve_profile(
+        cli_model=cmc.CLI_DEFAULT, worktree=_wt(tmp_path), codex_home=_home("ha", "gpt-5.6-sol"),
+    )
+    b = cmc.resolve_profile(
+        cli_model=cmc.CLI_DEFAULT, worktree=_wt(tmp_path), codex_home=_home("hb", "gpt-5.6-terra"),
+    )
+    assert a.native_model_pin == "gpt-5.6-sol"
+    assert b.native_model_pin == "gpt-5.6-terra"
+    assert a.digest != b.digest
+
+
+def test_resolve_binds_native_effort_pin_when_not_overridden(tmp_path):
+    def _home(name, effort):
+        h = tmp_path / name; h.mkdir(exist_ok=True)
+        (h / "config.toml").write_text(
+            f'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "{effort}"\n',
+            encoding="utf-8",
+        )
+        return str(h)
+
+    a = cmc.resolve_profile(worktree=_wt(tmp_path), codex_home=_home("ha", "low"))
+    b = cmc.resolve_profile(worktree=_wt(tmp_path), codex_home=_home("hb", "high"))
+    assert a.native_effort_pin == "low"
+    assert b.native_effort_pin == "high"
+    assert a.digest != b.digest
+    # an explicit effort flag makes the native effort irrelevant
+    m = cmc.resolve_profile(cli_effort="medium", worktree=_wt(tmp_path),
+                            codex_home=_home("ha", "low"))
+    assert m.native_effort_pin is None
 
 
 def test_resolve_malformed_project_config_is_always_loud(tmp_path):
@@ -335,11 +378,22 @@ def test_write_config_rejects_invalid_values_before_writing(tmp_path):
     raise AssertionError("expected ConfigError for invalid effort")
 
 
+def test_write_config_idempotent_for_identical_policy(tmp_path):
+    # Documented agent workflow: re-running init-config with the SAME policy
+    # is a no-op success (SKILL.md "idempotent").
+    path = str(tmp_path / ".codex-review.toml")
+    cmc.write_config(path, model="gpt-5.6-luna", reasoning_effort="medium")
+    cmc.write_config(path, model="gpt-5.6-luna", reasoning_effort="medium")  # no-op
+    assert cmc.load_config(path)["model"] == "gpt-5.6-luna"
+    # and no temp files are left behind
+    assert not list(Path(path).parent.glob(".codex-review-*.tmp"))
+
+
 def test_write_config_refuses_overwrite_without_force(tmp_path):
     path = str(tmp_path / ".codex-review.toml")
     cmc.write_config(path, model="gpt-5.6-luna")
     try:
-        cmc.write_config(path, model="gpt-5.6-terra")
+        cmc.write_config(path, model="gpt-5.6-terra")  # CONFLICTING policy
     except cmc.ConfigError as exc:
         assert "--force" in str(exc)
         assert cmc.load_config(path)["model"] == "gpt-5.6-luna"  # untouched
