@@ -55,7 +55,14 @@ enough context to pick up in three months.
 - **Effort:** M (human ~1d / CC ~1h) · **Priority:** P2
 - **Depends on:** Phase 7 merge.
 
-## Self-review weakening via worktree model config (open design question)
+## Self-review weakening via worktree model config (DECIDED 2026-08-18: accept residual risk)
+
+Decision (user, review gate D8): single-operator threat model — the
+config edit is diff-visible and costs a paid re-doctor + round advance.
+Revisit only if the skill is ever shared/org-used. D9 companion decision:
+the digest binds the named native pins (model, effort) only; the -p
+profile-content residual is accepted and documented in
+references/codex-model-selection.md. Original entry kept for context:
 
 - **What:** Decide whether `.codex-review.toml` inside the reviewed worktree
   may set the profile for the reviews of that worktree (the review target
