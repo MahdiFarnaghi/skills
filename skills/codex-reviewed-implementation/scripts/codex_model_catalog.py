@@ -58,14 +58,20 @@ _HEADING_RE = re.compile(r"<h[23][^>]*>\s*([a-z0-9][a-z0-9._-]{2,})\s*</h[23]>",
 # Native ~/.codex/models_cache.json — fail-soft primary source
 # ---------------------------------------------------------------------------
 
-def read_native_models_cache(codex_home: str | None = None) -> list[dict] | None:
-    """Read the CLI's own model cache; ``None`` on ANY problem (fail-soft)."""
+def _load_native_cache(
+    codex_home: str | None = None,
+) -> tuple[list[dict] | None, str | None]:
+    """Read+parse the CLI's own model cache ONCE; ``(None, None)`` on any
+    problem (fail-soft — including type-valid but non-object JSON, which the
+    CLI's own reader currently trips over in the wild)."""
     home = Path(codex_home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
     try:
         data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None, None
         models = data.get("models")
         if not isinstance(models, list):
-            return None
+            return None, None
         out: list[dict] = []
         for entry in models:
             if not isinstance(entry, dict) or not isinstance(entry.get("slug"), str):
@@ -81,20 +87,20 @@ def read_native_models_cache(codex_home: str | None = None) -> list[dict] | None
                 "default_reasoning_level": entry.get("default_reasoning_level"),
                 "supported_efforts": efforts,
             })
-        return out
-    except (OSError, ValueError, TypeError):
-        return None
+        stamp = data.get("fetched_at")
+        return out, stamp if isinstance(stamp, str) else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None, None
+
+
+def read_native_models_cache(codex_home: str | None = None) -> list[dict] | None:
+    """Read the CLI's own model cache; ``None`` on ANY problem (fail-soft)."""
+    return _load_native_cache(codex_home)[0]
 
 
 def native_cache_fetched_at(codex_home: str | None = None) -> str | None:
     """Best-effort ``fetched_at`` of the CLI's own model cache (fail-soft)."""
-    home = Path(codex_home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-    try:
-        data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
-        stamp = data.get("fetched_at")
-        return stamp if isinstance(stamp, str) else None
-    except (OSError, ValueError, TypeError):
-        return None
+    return _load_native_cache(codex_home)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -136,29 +142,37 @@ def load_cached_catalog(cache_base: str | None = None) -> dict | None:
 
 
 def save_cached_catalog(cache_base: str | None, data: dict[str, Any]) -> None:
-    path = cache_path(cache_base)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".catalog-", suffix=".tmp")
+    """Persist the advisory cache. Never raises: an unwritable cache
+    directory degrades silently — the catalog is display-only."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except OSError:
+        path = cache_path(cache_base)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".catalog-", suffix=".tmp")
         try:
-            os.unlink(tmp)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except OSError:
-            pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except OSError:
+        pass  # advisory persistence: cache-dir failure is never fatal
 
 
 # ---------------------------------------------------------------------------
 # Webpage pricing annotation (untrusted data → structured numbers only)
 # ---------------------------------------------------------------------------
 
+MAX_CATALOG_BYTES = 4 * 1024 * 1024  # bound memory + regex work on a hostile page
+
+
 def _default_fetch(url: str, timeout: float) -> str:
     with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
-        return resp.read().decode("utf-8", errors="replace")
+        return resp.read(MAX_CATALOG_BYTES).decode("utf-8", errors="replace")
 
 
 def _parse_page_prices(html: str) -> dict[str, tuple[float, float]]:
@@ -192,6 +206,19 @@ def _is_stale(fetched_at: str | None) -> bool:
     return age > STALE_AFTER_DAYS * 86400
 
 
+def _validated_cached_models(cached: dict | None) -> list[dict] | None:
+    """Shape-validate cached model entries before serving them; ``None`` when
+    the cache is absent or its models value is not a list of slug-bearing
+    dicts (a tampered/corrupt cache must degrade, never crash consumers)."""
+    if not cached:
+        return None
+    models = cached.get("models")
+    if not isinstance(models, list):
+        return None
+    ok = [m for m in models if isinstance(m, dict) and isinstance(m.get("slug"), str)]
+    return ok or None
+
+
 def list_models(
     *,
     refresh: bool = False,
@@ -201,15 +228,16 @@ def list_models(
 ) -> dict[str, Any]:
     """Best-effort model listing for humans and ``--json`` consumers.
 
-    Returns ``{"models": [...], "source": native|cached|none, "stale": bool,
-    "warnings": [...], "pricing_note": str}``. Advisory by contract: every
-    failure degrades the display (a warning is added) and NEVER raises —
-    catalog state can never block a doctor-valid model.
+    Returns ``{"models": [...], "source": native|web|cached|none, "stale":
+    bool, "warnings": [...], "pricing_note": str}``. Advisory by contract:
+    every failure degrades the display (a warning is added) and NEVER raises
+    — catalog state can never block a doctor-valid model.
     """
     warnings: list[str] = []
     fetch = fetch or _default_fetch
 
-    native = read_native_models_cache(codex_home)
+    # One read+parse of the CLI's cache serves both the models and the stamp.
+    native, native_fetched_at = _load_native_cache(codex_home)
     if native is None:
         warnings.append(
             "native models cache unavailable (unreadable, corrupt, or absent); "
@@ -243,11 +271,14 @@ def list_models(
                     "output_price_per_mtok": price[1],
                 })
 
-    source = "native" if native else "none"
-    fetched_at: str | None = None
     if native:
-        # Live native data: staleness reflects the CLI cache's own stamp.
-        fetched_at = native_cache_fetched_at(codex_home)
+        source = "native"
+        fetched_at = native_fetched_at
+    else:
+        # Page-only output is honest about its origin: these slugs came from
+        # the webpage, not the CLI's compatibility-bounded cache.
+        source = "web" if page_prices else "none"
+        fetched_at = None
     if models:
         if refresh and page_prices:
             fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -256,15 +287,17 @@ def list_models(
             })
         elif not native:
             cached = load_cached_catalog(cache_base)
-            if cached and cached.get("models"):
-                models = cached["models"]
-                fetched_at = cached.get("fetched_at")
+            cached_models = _validated_cached_models(cached)
+            if cached_models:
+                models = cached_models
+                fetched_at = cached.get("fetched_at") if isinstance(cached, dict) else None
                 source = "cached"
     if source == "none" and not models:
         cached = load_cached_catalog(cache_base)
-        if cached and cached.get("models"):
-            models = cached["models"]
-            fetched_at = cached.get("fetched_at")
+        cached_models = _validated_cached_models(cached)
+        if cached_models:
+            models = cached_models
+            fetched_at = cached.get("fetched_at") if isinstance(cached, dict) else None
             source = "cached"
 
     return {

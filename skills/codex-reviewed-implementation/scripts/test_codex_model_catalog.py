@@ -65,6 +65,46 @@ def test_read_native_cache_corrupt_returns_none(tmp_path):
     assert cat.read_native_models_cache(str(home)) is None
 
 
+def test_read_native_cache_non_object_json_fails_soft(tmp_path):
+    # Type-valid but non-object JSON must not crash the never-raises contract
+    # (an AttributeError here would take down list-models/validate-config).
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text("[1, 2, 3]", encoding="utf-8")
+    assert cat.read_native_models_cache(str(home)) is None
+    assert cat.native_cache_fetched_at(str(home)) is None
+    out = cat.list_models(codex_home=str(home), cache_base=str(tmp_path / "c"))
+    assert out["source"] == "none"
+    assert out["warnings"]
+
+
+def test_cached_catalog_bad_models_shape_degrades(tmp_path):
+    # A tampered/corrupt cache with a non-list models value must never reach
+    # consumers (m["slug"] would crash); it degrades to source "none".
+    home = tmp_path / "codexhome"; home.mkdir()  # no native cache
+    cache_base = tmp_path / "c"
+    cat.cache_path(str(cache_base)).parent.mkdir(parents=True, exist_ok=True)
+    cat.cache_path(str(cache_base)).write_text(
+        json.dumps({"fetched_at": "2026-08-01T00:00:00Z", "models": "boom"}),
+        encoding="utf-8",
+    )
+    out = cat.list_models(codex_home=str(home), cache_base=str(cache_base))
+    assert out["models"] == []
+
+
+def test_list_models_page_only_refresh_labels_source_web(tmp_path):
+    # Native cache absent + page parsed: the output is honest about coming
+    # from the webpage (no CLI compatibility info), labeled "web".
+    home = tmp_path / "codexhome"; home.mkdir()
+    webpage = ("<html><body><h2>gpt-5.6-page-only</h2>"
+               "<p>$1 / Input MTok &middot; $2 / Output MTok</p></body></html>")
+    out = cat.list_models(
+        refresh=True, codex_home=str(home), cache_base=str(tmp_path / "c"),
+        fetch=lambda url, timeout: webpage,
+    )
+    assert out["source"] == "web"
+    assert any(m["slug"] == "gpt-5.6-page-only" for m in out["models"])
+
+
 def test_read_native_cache_missing_returns_none(tmp_path):
     home = tmp_path / "codexhome"; home.mkdir()
     assert cat.read_native_models_cache(str(home)) is None

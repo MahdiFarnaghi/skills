@@ -452,6 +452,7 @@ META_FIELDS = (
     # Phase 7 execution-profile fields — the resolved profile is recorded so
     # an observation is attributable to exactly what ran (never just "null").
     "reasoning_effort",
+    "codex_profile",
     "config_version",
     "resolution_source",
     "profile_digest",

@@ -46,6 +46,10 @@
       "type": ["string", "null"],
       "description": "Phase 7 execution profile: native reasoning-effort override in effect for this invocation."
     },
+    "codex_profile": {
+      "type": ["string", "null"],
+      "description": "Phase 7 execution profile: native -p profile pass-through in effect for this invocation."
+    },
     "config_version": {
       "type": ["integer", "string", "null"],
       "description": "Phase 7 execution profile: project config version, or the 'none' sentinel for config-less runs."

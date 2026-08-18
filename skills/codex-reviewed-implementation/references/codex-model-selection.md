@@ -44,13 +44,16 @@ codex_profile = "review"         # optional native -p pass-through
 ```
 
 - Only these four keys are accepted; unknown keys are rejected on load
-  (catches `reasoning-effort` vs `reasoning_effort` typos).
+  (catches `reasoning-effort` vs `reasoning_effort` typos), and
+  `init-config` validates values at the write seam so it can never emit a
+  config the loader rejects.
 - No catalog metadata, timestamps, or `[escalation]` section: the
   version-controlled file stays declarative and diff-stable. Provenance
   lives in the advisory cache; escalation has no defined consumer and was
   cut (reintroduce only with a tested deterministic trigger).
-- Exact ids bind receipts; aliases are rejected by `validate-config` when
-  the advisory catalog can resolve them.
+- Exact ids bind receipts; possible aliases or retired ids are flagged as a
+  **warning** by `validate-config` when the advisory catalog can resolve
+  them (advisory, never blocking) — run `list-models` to pick an exact slug.
 
 ## Commands
 
@@ -74,7 +77,7 @@ python3 scripts/run_codex_review.py list-models --json [--refresh]
 
 | Condition | Code | Message template |
 |---|---|---|
-| No policy + non-interactive + `--require-config` | `E_CONFIG_MISSING` | `E_CONFIG_MISSING: No review model is configured for <worktree> and stdin is non-interactive.` Fix: `init-config --worktree <path> --model <MODEL>` or pass `--model <MODEL>` (or `--model cli-default`). |
+| No model pinned + `--require-config` set (CI) | `E_CONFIG_MISSING` | `E_CONFIG_MISSING: No review model is configured for <worktree> and --require-config is set (CI mode).` Fix: `init-config --worktree <path> --model <MODEL>` or pass `--model <MODEL>` (or `--model cli-default`). Note: an effort-only flag does NOT satisfy it — the model dimension must be pinned. |
 | Malformed/unknown-key/bad-version/bad-effort config | `E_CONFIG_MALFORMED` | `E_CONFIG_MALFORMED: config <path> ... <exact problem + offending key>.` Fix: correct the key, then `validate-config --worktree <path>`. |
 | `init-config` over existing file | `E_CONFIG_EXISTS` | `E_CONFIG_EXISTS: config <path> already exists; pass --force to replace it (existing project policies are never silently overwritten).` |
 | Doctor receipt bound to a different profile (including pre-Phase-7 receipts) | outcome `doctor_required` | `doctor receipt mismatch: profile_digest (profile changed or this is a pre-Phase-7 receipt; re-run doctor with the current profile to certify it)` |
@@ -87,7 +90,9 @@ python3 scripts/run_codex_review.py list-models --json [--refresh]
   remediation. That is deliberate fail-closed behavior.
 - Pre-Phase-7 ledger entries lack `profile_digest`; re-entering those rounds
   raises the standard round-conflict error naming `profile_digest` — start a
-  new round.
+  new round. (A recorded digest that differs on a *completed* round is the
+  `profile_changed` advance case; a *running* round always keeps mutual
+  exclusion regardless of profile mismatch.)
 
 ## Advisory catalog invariants
 
@@ -100,6 +105,10 @@ python3 scripts/run_codex_review.py list-models --json [--refresh]
   path never imports (test-enforced). Catalog state can degrade `list-models`
   display only; **the paid doctor is the sole validator of a profile**.
 - Cache files live under `$XDG_CACHE_HOME/codex-reviewed-implementation/`
-  (or the platform cache home) — never inside a reviewed worktree, where a
-  cache write would dirty the target fingerprint and break the doctor's
-  read-only check.
+  (or the platform cache home) — outside every reviewed worktree by
+  construction; `ensure_cache_path_outside_worktree` guards custom cache
+  paths for API callers (realpath-aware, symlink-safe). Cache writes are
+  best-effort: an unwritable cache directory is ignored, never fatal.
+- `list-models --refresh` output labels its origin honestly: `native`
+  (CLI cache), `web` (page-parsed, no CLI compatibility info), `cached`,
+  or `none`.

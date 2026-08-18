@@ -52,7 +52,11 @@ def test_load_config_rejects_malformed_toml(tmp_path):
 
 
 def test_load_config_rejects_wrong_version(tmp_path):
-    _expect_config_error(tmp_path, 'version = 2\nmodel = "m"\n', "version must be 1")
+    _expect_config_error(tmp_path, 'version = 2\nmodel = "m"\n', "version must be")
+    # 1.0/true compare equal to 1 in Python but must NOT pass: they would
+    # silently change the profile digest relative to the integer 1.
+    _expect_config_error(tmp_path, 'version = 1.0\nmodel = "m"\n', "integer")
+    _expect_config_error(tmp_path, 'version = true\nmodel = "m"\n', "integer")
 
 
 def test_load_config_rejects_bad_effort(tmp_path):
@@ -65,6 +69,8 @@ def test_load_config_rejects_bad_model_shape(tmp_path):
     _expect_config_error(
         tmp_path, 'version = 1\nmodel = "not a model!!"\n', "'model'"
     )
+    # \Z anchors: a trailing newline must not slip through $-style matching
+    _expect_config_error(tmp_path, 'version = 1\nmodel = "gpt-5\\n"\n', "'model'")
 
 
 def test_load_config_rejects_missing_file(tmp_path):
@@ -251,16 +257,23 @@ def test_write_config_round_trips_through_load(tmp_path):
     }
 
 
-def test_write_config_escapes_special_characters(tmp_path):
+def test_write_config_rejects_invalid_values_before_writing(tmp_path):
+    # The write seam validates values: init-config must never emit a config
+    # its own loader rejects one command later.
     path = str(tmp_path / ".codex-review.toml")
-    hostile = 'weird"\\model\nname'
-    cmc.write_config(path, model=hostile)  # emitter must survive any string
-    # load_config validates the shape; hostile ids fail the shape check but
-    # the FILE must still be valid TOML (parseable by tomllib)
-    import tomllib
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    assert data["model"] == hostile
+    for bad_model in ('weird"\\model\nname', "x; touch pwned", "gpt-5\n"):
+        try:
+            cmc.write_config(path, model=bad_model)
+        except cmc.ConfigError:
+            assert not os.path.exists(path), "invalid value must not be written"
+            continue
+        raise AssertionError(f"expected ConfigError for model {bad_model!r}")
+    try:
+        cmc.write_config(path, model="gpt-5.6-luna", reasoning_effort="turbo")
+    except cmc.ConfigError:
+        assert not os.path.exists(path)
+        return
+    raise AssertionError("expected ConfigError for invalid effort")
 
 
 def test_write_config_refuses_overwrite_without_force(tmp_path):

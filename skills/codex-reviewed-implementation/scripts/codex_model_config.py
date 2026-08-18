@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from hashlib import sha256
@@ -51,7 +51,39 @@ VALID_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 #: Closed schema: the only keys a project config may carry.
 CONFIG_KEYS = ("version", "model", "reasoning_effort", "codex_profile")
 
-_MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.IGNORECASE)
+# \Z (not $): $ would accept a trailing newline, which would then flow into
+# argv and the -c TOML-value quoting as an invalid character.
+_MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\Z", re.IGNORECASE)
+
+
+def validate_policy_values(
+    model: str | None, reasoning_effort: str | None = None,
+    codex_profile: str | None = None,
+) -> None:
+    """Validate policy VALUES at the seam that writes or forwards them.
+
+    ``load_config`` re-checks everything on read; this guards the write side
+    (``init-config`` / ``write_config``) so a bootstrap command can never
+    emit a config its own loader rejects. Raises ``ConfigError``.
+    """
+    if model is not None and model != CLI_DEFAULT and not _MODEL_ID_RE.match(model):
+        raise ConfigError(
+            "E_CONFIG_MALFORMED",
+            f"E_CONFIG_MALFORMED: model must be a model id or '{CLI_DEFAULT}', "
+            f"got {model!r}.",
+        )
+    if reasoning_effort is not None and reasoning_effort not in VALID_REASONING_EFFORTS:
+        raise ConfigError(
+            "E_CONFIG_MALFORMED",
+            f"E_CONFIG_MALFORMED: reasoning effort must be one of "
+            f"{VALID_REASONING_EFFORTS}, got {reasoning_effort!r}.",
+        )
+    if codex_profile is not None and not _MODEL_ID_RE.match(codex_profile):
+        raise ConfigError(
+            "E_CONFIG_MALFORMED",
+            f"E_CONFIG_MALFORMED: codex_profile must be a profile name "
+            f"(letters/digits/dots/dashes), got {codex_profile!r}.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +101,7 @@ class ConfigError(Exception):
 def config_missing_message(worktree: str) -> str:
     return (
         "E_CONFIG_MISSING: No review model is configured for "
-        f"{worktree} and stdin is non-interactive.\n"
+        f"{worktree} and --require-config is set (CI mode).\n"
         "Fix: run `run_codex_review.py init-config --worktree <path> "
         "--model <MODEL>` or pass `--model <MODEL>` (or `--model cli-default` "
         "to keep the Codex CLI's own default)."
@@ -116,10 +148,12 @@ def load_config(path: str) -> dict[str, Any]:
         )
 
     version = data.get("version")
-    if version != SUPPORTED_CONFIG_VERSION:
+    # type(...) is int rejects bools (True == 1) and floats (1.0 == 1), which
+    # would otherwise pass the equality check yet change the profile digest.
+    if type(version) is not int or version != SUPPORTED_CONFIG_VERSION:
         raise ConfigError(
             "E_CONFIG_UNSUPPORTED_VERSION",
-            f"E_CONFIG_MALFORMED: config {path} version must be "
+            f"E_CONFIG_MALFORMED: config {path} version must be the integer "
             f"{SUPPORTED_CONFIG_VERSION}, got {version!r}.",
         )
 
@@ -270,11 +304,11 @@ def resolve_profile(
         path = os.path.join(worktree, CONFIG_FILENAME)
         if os.path.isfile(path):
             config = load_config(path)  # loud on malformed
-            config_version = config.get("version", "none")
+            config_version = config["version"]  # load_config guarantees int 1
 
     has_cli = any(v is not None for v in (cli_model, cli_effort, cli_codex_profile))
     if has_cli:
-        return ExecutionProfile(
+        profile = ExecutionProfile(
             model=cli_model if cli_model is not None else config.get("model"),
             reasoning_effort=cli_effort if cli_effort is not None
             else config.get("reasoning_effort"),
@@ -283,6 +317,14 @@ def resolve_profile(
             config_version=config_version,
             resolution_source="cli_flag",
         )
+        # require_config gates the MODEL dimension specifically: an effort-only
+        # flag must not satisfy it while the model silently rides the native
+        # default (the exact condition Phase 7 exists to eliminate).
+        if require_config and profile.model is None:
+            raise ConfigError(
+                "E_CONFIG_MISSING", config_missing_message(worktree or "<worktree>")
+            )
+        return profile
 
     if config.get("model") or config.get("reasoning_effort") or config.get("codex_profile"):
         return ExecutionProfile(
@@ -338,6 +380,9 @@ def write_config(
             "replace it (existing project policies are never silently "
             "overwritten).",
         )
+    # Value validation at the write seam: a bootstrap command must never emit
+    # a config its own loader rejects one command later.
+    validate_policy_values(model, reasoning_effort, codex_profile)
     lines = [f"version = {SUPPORTED_CONFIG_VERSION}", f"model = {_toml_string(model)}"]
     if reasoning_effort is not None:
         lines.append(f"reasoning_effort = {_toml_string(reasoning_effort)}")
@@ -348,9 +393,20 @@ def write_config(
     # Parse-back validation: never let an unrepresentable value corrupt the file.
     tomllib.loads(text)
 
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # mkstemp (not a fixed .tmp name): two concurrent init-config runs must
+    # not truncate each other's temp file and install a torn config.
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(path)) or ".", prefix=".codex-review-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

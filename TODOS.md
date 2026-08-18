@@ -34,6 +34,44 @@ enough context to pick up in three months.
 - **Effort:** M (human ~1d / CC ~1h) · **Priority:** P3
 - **Depends on:** Phase 7 shipped + observed usage.
 
+## Quota reader / reviewer full-profile parity
+
+- **What:** Pass the frozen execution profile (effort, `-p` profile) into
+  `QuotaObserver`/`read_codex_quota.py` so the quota-read `codex app-server`
+  invocation is constructed from the same option surface as the review it
+  observes (currently only the model is pinned).
+- **Why:** A `codex_profile` that changes CLI configuration can make quota
+  snapshots read under a different config than the review that attributed
+  them; plan.md's parity claim is only partially true as-built.
+- **Pros:** Observations attributable to exactly what ran; closes the plan
+  delta.
+- **Cons:** Requires probing which flags `codex app-server` accepts for
+  effort/profile before wiring (undocumented surface).
+- **Context:** Surfaced by the 2026-08-18 consistency review (red-team +
+  Codex structured findings). `read_codex_quota.py:201` builds its own
+  `-c model="..."`; `_exec_option_flags` in run_codex_review.py is the
+  shared builder to reuse. Also decide digest semantics for a
+  `--codex-config <k=v>` pass-through while here.
+- **Effort:** M (human ~1d / CC ~1h) · **Priority:** P2
+- **Depends on:** Phase 7 merge.
+
+## Self-review weakening via worktree model config (open design question)
+
+- **What:** Decide whether `.codex-review.toml` inside the reviewed worktree
+  may set the profile for the reviews of that worktree (the review target
+  currently picks its own reviewer model/effort), or whether the profile must
+  come from operator-controlled sources (CLI flags / config outside the tree /
+  config snapshot recorded at plan acceptance).
+- **Why:** A malicious implementation diff can commit a weak-model config
+  before the doctor run; the re-doctor + round-advance cost is a speed bump,
+  not a barrier.
+- **Pros of restricting:** removes the self-weakening vector entirely.
+- **Cons:** loses per-repo convenience policy; adds operator burden.
+- **Context:** Red-team + adversarial finding from the 2026-08-18 review
+  (both marked INVESTIGATE — a human design call, not a mechanical fix).
+- **Effort:** S-M (decision + guard) · **Priority:** P2 (decision) 
+- **Depends on:** user decision.
+
 ## Quota-cost view from Phase 6 observations
 
 - **What:** A per-model cost/quota-draw view built from the Phase 6
