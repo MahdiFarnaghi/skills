@@ -1,7 +1,7 @@
 <!-- /autoplan restore point: /Users/m.farnaghi/.gstack/projects/MahdiFarnaghi-skills/main-autoplan-restore-20260818-123056.md -->
 <!-- /autoplan restore point: /Users/m.farnaghi/.gstack/projects/MahdiFarnaghi-skills/main-autoplan-restore-phase4-20260812-224941.md -->
 
-# Phase 7 — Execution-profile resolution and recorded model policy
+# Phase 7 — Execution-profile resolution and recorded model policy [implemented 2026-08-18, branch worktree-phase7-model-config]
 
 > **REFRAMED 2026-08-18 (autoplan user decision, gate D5).** The original
 > design — a bespoke `.codex-review.toml` precedence chain with a webpage
@@ -3476,45 +3476,45 @@ and the review proceeds. The difference between those two worlds is one flag."
 Synthesized from this review's findings. Each task derives from a specific
 finding above. Run with Claude Code or Codex; checkbox as you ship.
 
-- [ ] **G1 (P1, decision)** — Resolve the USER CHALLENGE: reframe to thin native layer vs plan as written — **user's call at the gate**
-- [ ] **T1 (P1, human: ~2d / CC: ~2h)** — transport — canonical ExecutionProfile + digest across doctor/review/ledger/replay/quota
+- [x] **G1 (P1, decision)** — Resolve the USER CHALLENGE: reframe to thin native layer vs plan as written — **user's call at the gate**
+- [x] **T1 (P1, human: ~2d / CC: ~2h)** — transport — canonical ExecutionProfile + digest across doctor/review/ledger/replay/quota
   - Surfaced by: Eng dual voices (critical ×2) — claim_round :809/:1272 not profile-bound
   - Files: scripts/run_codex_review.py, scripts/quota_observation.py
   - Verify: new unit tests reject cross-profile replay + legacy receipts
-- [ ] **T2 (P1, human: ~1d / CC: ~45min)** — transport — non-interactive bootstrap: init-config --model/--effort (idempotent) + agent decision tree in SKILL.md
+- [x] **T2 (P1, human: ~1d / CC: ~45min)** — transport — non-interactive bootstrap: init-config --model/--effort (idempotent) + agent decision tree in SKILL.md
   - Surfaced by: DX both voices (critical) — primary user has no TTY
   - Files: scripts/codex_model_config.py, SKILL.md
   - Verify: stdin=DEVNULL test; fresh-project e2e without human
-- [ ] **T3 (P1, human: ~1d / CC: ~45min)** — transport — error-spec: stable codes + verbatim templates (config missing/malformed, retired model, receipt mismatch with both profiles + doctor command)
+- [x] **T3 (P1, human: ~1d / CC: ~45min)** — transport — error-spec: stable codes + verbatim templates (config missing/malformed, retired model, receipt mismatch with both profiles + doctor command)
   - Surfaced by: DX both (high); Eng exit-code finding
   - Files: scripts/codex_model_config.py, references/codex-model-selection.md
   - Verify: message-template unit tests
-- [ ] **T4 (P2, human: ~1d / CC: ~45min)** — transport — defaults.toml semantics + precedence fix (per gate decision #22) + `--require-config` CI flag
+- [x] **T4 (P2, human: ~1d / CC: ~45min)** — transport — defaults.toml semantics + precedence fix (per gate decision #22) + `--require-config` CI flag
   - Surfaced by: CEO F5 / Eng F1 / DX both — linchpin unspecified
   - Files: config/defaults.toml, scripts/codex_model_config.py
   - Verify: precedence permutation tests incl. fresh-project non-interactive
-- [ ] **T5 (P2, human: ~4h / CC: ~20min)** — transport — single exec-option builder + preflight probe parity; reader/reviewer profile parity
+- [x] **T5 (P2, human: ~4h / CC: ~20min)** — transport — single exec-option builder + preflight probe parity; reader/reviewer profile parity
   - Surfaced by: Eng — probe :985 certifies wrong vector; reader uses -c vs -m
   - Files: scripts/run_codex_review.py, scripts/read_codex_quota.py
   - Verify: argv-parity tests with -m/-c active
-- [ ] **T6 (P2, human: ~4h / CC: ~20min)** — transport — META_FIELDS + quota schemas accept profile fields; report tolerance
+- [x] **T6 (P2, human: ~4h / CC: ~20min)** — transport — META_FIELDS + quota schemas accept profile fields; report tolerance
   - Surfaced by: Eng both voices — allowlist silently drops
   - Files: scripts/quota_observation.py, schemas/codex-quota-*.json
   - Verify: observation record contains reasoning_effort/config_version/source
-- [ ] **T7 (P2, human: ~4h / CC: ~30min)** — catalog — advisory-only catalog: models_cache.json primary (fail-soft), webpage pricing on --refresh, XDG cache outside worktrees, import-isolation test
+- [x] **T7 (P2, human: ~4h / CC: ~30min)** — catalog — advisory-only catalog: models_cache.json primary (fail-soft), webpage pricing on --refresh, XDG cache outside worktrees, import-isolation test
   - Surfaced by: CEO F3/F4, Eng F6, DX F7/F8
   - Files: scripts/codex_model_catalog.py, tests
   - Verify: offline/stale/corrupt nil-matrix all degrade display only
-- [ ] **T8 (P2, human: ~4h / CC: ~30min)** — docs — SKILL.md "Choose and configure the Codex model" + list-models --json + validate-config resolved-profile echo
+- [x] **T8 (P2, human: ~4h / CC: ~30min)** — docs — SKILL.md "Choose and configure the Codex model" + list-models --json + validate-config resolved-profile echo
   - Surfaced by: DX both
   - Files: SKILL.md, scripts/codex_model_config.py
   - Verify: agent flow works reading SKILL.md only
-- [ ] **T9 (P2, human: ~2d / CC: ~1.5h)** — tests — full matrix (26 new + 3 updated) per test-plan artifact
+- [x] **T9 (P2, human: ~2d / CC: ~1.5h)** — tests — full matrix (26 new + 3 updated) per test-plan artifact
   - Surfaced by: Eng test diagram
   - Files: scripts/test_codex_model_config.py, test_run_codex_review.py
   - Verify: python3 -m pytest scripts/ green
 
-**Status: APPROVED WITH REFRAME (2026-08-18, gate D5).** User adopted the thin
+**Status: IMPLEMENTED (2026-08-18) — approved with reframe (gate D5), built TDD on worktree-phase7-model-config; 217 tests green.** User adopted the thin
 native execution-profile reframe and all auto-decisions. The Phase 7 section
 above reflects the approved design. Implementation may proceed through tasks
 T1-T9; the four P1 tasks (canonical profile, legacy migration, error spec,

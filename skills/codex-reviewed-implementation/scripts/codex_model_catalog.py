@@ -86,6 +86,17 @@ def read_native_models_cache(codex_home: str | None = None) -> list[dict] | None
         return None
 
 
+def native_cache_fetched_at(codex_home: str | None = None) -> str | None:
+    """Best-effort ``fetched_at`` of the CLI's own model cache (fail-soft)."""
+    home = Path(codex_home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    try:
+        data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
+        stamp = data.get("fetched_at")
+        return stamp if isinstance(stamp, str) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Cache placement + persistence (outside reviewed worktrees)
 # ---------------------------------------------------------------------------
@@ -234,6 +245,9 @@ def list_models(
 
     source = "native" if native else "none"
     fetched_at: str | None = None
+    if native:
+        # Live native data: staleness reflects the CLI cache's own stamp.
+        fetched_at = native_cache_fetched_at(codex_home)
     if models:
         if refresh and page_prices:
             fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

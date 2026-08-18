@@ -1252,7 +1252,11 @@ def run_doctor(
                     "doctor_receipt_digest": file_digest(receipt_path),
                     "codex_path": codex_path,
                     "codex_version": receipt.get("codex_version"),
-                    "model": model,
+                    "model": prof.model,
+                    "reasoning_effort": prof.reasoning_effort,
+                    "config_version": prof.config_version,
+                    "resolution_source": prof.resolution_source,
+                    "profile_digest": prof.digest,
                     "review_kind": None,
                     "review_phase": "doctor",
                     "milestone": None,
@@ -1627,7 +1631,11 @@ def run_review(
             if doctor_receipt and os.path.isfile(doctor_receipt) else None,
             "codex_path": codex_path,
             "codex_version": codex_version or None,
-            "model": model,
+            "model": prof.model,
+            "reasoning_effort": prof.reasoning_effort,
+            "config_version": prof.config_version,
+            "resolution_source": prof.resolution_source,
+            "profile_digest": prof.digest,
             "review_kind": review_kind,
             "review_phase": review_phase,
             "milestone": milestone,
@@ -1769,6 +1777,15 @@ def _cmd_init_config(args: argparse.Namespace) -> int:
     print(json.dumps({
         "config": os.path.join(worktree, cmc.CONFIG_FILENAME),
         "profile": profile.receipt_fields(),
+        "next": (
+            "certify the profile once with the paid doctor: "
+            f"run_codex_review.py doctor --worktree {worktree} "
+            "--schema schemas/codex-review-output.schema.json "
+            "--receipt <outside-worktree-doctor.json>"
+            + (f" --model {model}" if model else "")
+            + (" --reasoning-effort "
+               + args.reasoning_effort if args.reasoning_effort else "")
+        ),
     }, indent=2, sort_keys=True))
     return EX_OK
 
@@ -1786,6 +1803,30 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
             "no project config; resolving the native default (recorded, warned, "
             "never blocking) — run init-config to pin a policy"
         )
+    # Advisory catalog checks (Phase 7): surface alias/retired/effort hints
+    # when the CLI's own model cache is readable. Absent catalog → no
+    # warnings — advisory checks never depend on catalog presence.
+    if profile.model:
+        import codex_model_catalog  # lazy: keeps the review path catalog-free
+
+        native = codex_model_catalog.read_native_models_cache()
+        if native:
+            known = {m["slug"] for m in native}
+            if profile.model not in known:
+                warnings.append(
+                    f"model {profile.model!r} is not in the CLI's model cache — "
+                    "possible alias or retired id; run list-models to pick an "
+                    "exact slug"
+                )
+            elif profile.reasoning_effort:
+                entry = next(m for m in native if m["slug"] == profile.model)
+                efforts = entry.get("supported_efforts") or []
+                if efforts and profile.reasoning_effort not in efforts:
+                    warnings.append(
+                        f"reasoning_effort {profile.reasoning_effort!r} is not "
+                        f"listed as supported for {profile.model!r} "
+                        f"({','.join(efforts)})"
+                    )
     print(json.dumps({
         "profile": profile.receipt_fields(),
         "warnings": warnings,

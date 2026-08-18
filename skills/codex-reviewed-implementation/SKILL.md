@@ -23,11 +23,26 @@ Default for substantial multi-step work without safety-critical state semantics.
 
 Required for security, privacy, financial, durable-state, distributed, concurrency, recovery, schema-transition, compatibility, or high-impact operational work. Require the full safety lifecycle ([references/safety-lifecycle.md](references/safety-lifecycle.md)), a durable acceptance ledger, the Codex plan challenge, a failure and concurrency model, applicable real-service, cross-process, and Docker verification, milestone reviews, and a final integration review.
 
+## Model policy (Phase 7)
+
+Every review runs under an explicit **execution profile** — the model, reasoning effort, and policy provenance — that is resolved once, recorded in every doctor receipt, review receipt, ledger round, and quota observation, and bound by digest: a receipt for one profile never authorizes another.
+
+**Resolution precedence** (full detail in [references/codex-model-selection.md](references/codex-model-selection.md)):
+
+1. CLI flags: `--model <id|cli-default>`, `--reasoning-effort`, `--codex-profile`.
+2. The worktree's `.codex-review.toml` (`version = 1`, `model`, `reasoning_effort`, `codex_profile`; malformed config is a loud error, never a silent default).
+3. With no policy anywhere, the wrapper records the native default (`resolution_source: user_config` or `cli_default`) and warns — zero-config projects keep working exactly as before.
+4. `--require-config` (CI) turns case 3 into a fast `E_CONFIG_MISSING` failure instead.
+
+**Agent decision tree (no config present, non-interactive):** resolve the recorded native default and proceed with the warning, or pin a policy yourself with `init-config --worktree <path> --model <model> [--reasoning-effort <e>]` (idempotent; never blocks on a prompt). A human at a terminal can run `init-config` bare for the interactive picker. `validate-config --worktree <path>` prints the fully resolved profile and which level won; `list-models --json` lists available models (advisory: compatibility from the CLI's own cache, API prices labeled as not reflecting subscription quota).
+
+Profile changes have consequences: a new profile needs a fresh doctor receipt, and re-entering a completed ledger round under a different profile returns `profile_changed` — advance to the next round number; the old verdict stays bound to its profile.
+
 ## Preconditions
 
 1. Read the repository instructions, authoritative task artifacts, current-system documentation, and relevant design decisions.
 2. Run the free transport preflight: `python3 scripts/run_codex_review.py preflight --schema schemas/codex-review-output.schema.json --worktree <abs-root>`. It verifies CLI/auth/schema/parser prerequisites without spending usage.
-3. Require a successful doctor receipt matching the exact CLI version, platform, model, transport version, and schema digest. If none exists (or any of those changed), run the explicit paid check once: `python3 scripts/run_codex_review.py doctor --worktree <abs-root> --schema schemas/codex-review-output.schema.json --receipt <outside-worktree-doctor.json> [--model <model>]`. Pass that same model to every review using the receipt. The doctor proves plain `codex exec` returns output conforming to the production verdict schema and preserves read-only state. If preflight or doctor fails, STOP before implementation and offer operator-mediated review only as an explicit, user-approved fallback. Never silently downgrade.
+3. Require a successful doctor receipt matching the exact CLI version, platform, **execution profile** (model, reasoning effort, config version, profile digest), transport version, and schema digest. If none exists (or any of those changed), run the explicit paid check once: `python3 scripts/run_codex_review.py doctor --worktree <abs-root> --schema schemas/codex-review-output.schema.json --receipt <outside-worktree-doctor.json> [--model <model>] [--reasoning-effort <e>]`. Keep the profile unchanged for every review using the receipt — or re-run doctor and advance to a new review round. The doctor proves plain `codex exec` returns output conforming to the production verdict schema and preserves read-only state. If preflight or doctor fails, STOP before implementation and offer operator-mediated review only as an explicit, user-approved fallback. Never silently downgrade.
 
 Before planning, inspect registered worktrees, active branches, HEAD, tracked and untracked changes, and any existing task ownership. Do not begin when another branch, worktree, agent, or process owns overlapping scope until ownership is reconciled. Use an isolated branch or worktree when repository policy requires it or when separation materially reduces risk; never create one without respecting user authorization and existing work.
 
@@ -163,7 +178,8 @@ For each milestone:
       --milestone <id> --round <n> \
       --packet <validated-review-packet> \
       --schema schemas/codex-review-output.schema.json \
-      [--model <same-model-certified-by-doctor>] \
+      [--model <id|cli-default>] [--reasoning-effort <e>] [--codex-profile <p>] \
+      [--require-config] \
       --output-dir <dir-outside-the-worktree> \
       --state-ledger <loop-state-ledger-path> \
       --doctor-receipt <matching-doctor-receipt> \

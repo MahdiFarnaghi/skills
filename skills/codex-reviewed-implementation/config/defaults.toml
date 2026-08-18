@@ -1,0 +1,15 @@
+# Skill-wide model-policy defaults (Phase 7).
+#
+# This file deliberately ships with NO model pin. It documents the project
+# config convention only — a pinned default here would silently change every
+# project's review model (and invalidate their doctor receipts) on every
+# skill update. Per-project policy belongs in the target worktree's
+# .codex-review.toml:
+#
+#   version = 1
+#   model = "gpt-5.6-luna"          # exact id, or "cli-default"
+#   reasoning_effort = "medium"      # low | medium | high | xhigh | max
+#   codex_profile = "review"         # optional native -p pass-through
+#
+# See references/codex-model-selection.md for the full precedence chain and
+# error templates.

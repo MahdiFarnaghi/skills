@@ -1320,5 +1320,91 @@ def test_review_without_config_records_native_default(monkeypatch, tmp_path):
     assert captured["model"] is None  # no -m passed: today's behavior preserved
 
 
+def test_run_review_records_profile_in_observation(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    obs = FakeQuotaObserver(before_snap=_ok_snapshot(10), after_snap=_ok_snapshot(12))
+    wt = tmp_path / "wt"
+    wt.mkdir(exist_ok=True)
+    (wt / ".git").mkdir(exist_ok=True)
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)))
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(tmp_path / "packet.md"), schema_path=str(tmp_path / "schema.json"),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), profile=_profile(), runner=fake,
+        quota_observer=obs,
+    )
+    assert res.outcome == "completed"
+    assert len(obs.records) == 1
+    meta = obs.records[0][0]
+    assert meta["profile_digest"] == _profile().digest
+    assert meta["reasoning_effort"] == "medium"
+    assert meta["config_version"] == 1
+    assert meta["resolution_source"] == "project_config"
+
+
+def test_validate_config_warns_on_unknown_model_slug(tmp_path, capsys, monkeypatch):
+    # Advisory: if the CLI's own model cache is readable and the pinned slug
+    # is unknown, surface the alias/retired hint. Catalog unavailable → no
+    # warning (advisory checks never depend on catalog presence).
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({
+        "models": [{"slug": "gpt-5.6-sol",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    warnings = " ".join(payload["warnings"])
+    assert "gpt-5.6" in warnings
+    assert "list-models" in warnings
+
+
+def test_validate_config_warns_on_unsupported_effort(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({
+        "models": [{"slug": "gpt-5.6-sol",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6-sol"\nreasoning_effort = "max"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    warnings = " ".join(payload["warnings"])
+    assert "reasoning_effort" in warnings
+    assert "max" in warnings
+
+
+def test_validate_config_no_warning_without_catalog(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty"))  # no cache
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "anything"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["warnings"] == []
+
+
+def test_init_config_prints_next_command(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main([
+        "init-config", "--worktree", str(wt),
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "medium",
+    ])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "doctor" in out  # the paid certification step is named, not auto-run
+
+
 if __name__ == "__main__":
     sys.exit(subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"]).returncode)

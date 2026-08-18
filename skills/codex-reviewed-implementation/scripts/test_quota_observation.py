@@ -374,6 +374,34 @@ def test_record_conforms_to_snapshot_schema():
         assert key in rec["candidate_limits"][0], f"candidate missing {key!r}"
 
 
+def test_profile_fields_survive_meta_allowlist():
+    """Phase 7: the execution profile must reach the JSONL store. META_FIELDS
+    is a strict allowlist that silently drops unknown keys — wrapper-side
+    tests alone would pass while the store loses the data."""
+    before = _snapshot("ok", "acct1", [])
+    rec = qo.build_observation_record({
+        "invocation_id": "i1", "review_phase": "milestone", "outcome": "completed",
+        "model": "gpt-5.6-luna", "reasoning_effort": "medium",
+        "config_version": 1, "resolution_source": "project_config",
+        "profile_digest": "d" * 64,
+    }, before, before)
+    for key in ("model", "reasoning_effort", "config_version",
+                "resolution_source", "profile_digest"):
+        assert rec.get(key) is not None, f"{key} dropped by META_FIELDS allowlist"
+
+
+def test_snapshot_schema_declares_profile_fields():
+    """additionalProperties:false means an undeclared field would make every
+    new record schema-invalid."""
+    schema_path = os.path.join(
+        os.path.dirname(__file__), "..", "schemas", "codex-quota-snapshot.schema.json"
+    )
+    schema = json.loads(Path(schema_path).read_text())
+    for key in ("reasoning_effort", "config_version", "resolution_source",
+                "profile_digest"):
+        assert key in schema["properties"], f"snapshot schema missing {key!r}"
+
+
 def test_record_persists_no_raw_identity_or_plan():
     """Raw account identifiers, plan, and limit labels never reach the record."""
     salt = bytes.fromhex("07" * 32)
