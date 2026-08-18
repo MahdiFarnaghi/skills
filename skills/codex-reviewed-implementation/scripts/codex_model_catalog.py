@@ -285,6 +285,19 @@ def list_models(
             save_cached_catalog(cache_base, {
                 "fetched_at": fetched_at, "catalog_url": CATALOG_URL, "models": models,
             })
+        elif native and not page_prices:
+            # Serve native compatibility data WITH the pricing annotations a
+            # previous --refresh persisted — otherwise the offline cache
+            # would lose its pricing the moment the native cache is present.
+            cached = load_cached_catalog(cache_base)
+            cached_models = _validated_cached_models(cached)
+            if cached_models:
+                by_slug = {m["slug"]: m for m in cached_models}
+                for m in models:
+                    price = by_slug.get(m["slug"])
+                    if price and "input_price_per_mtok" in price:
+                        m["input_price_per_mtok"] = price["input_price_per_mtok"]
+                        m["output_price_per_mtok"] = price.get("output_price_per_mtok")
         elif not native:
             cached = load_cached_catalog(cache_base)
             cached_models = _validated_cached_models(cached)

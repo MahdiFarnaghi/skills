@@ -1140,6 +1140,7 @@ def doctor_key(
         "reasoning_effort": prof.reasoning_effort,
         "codex_profile": prof.codex_profile,
         "config_version": prof.config_version,
+        "native_model_pin": prof.native_model_pin,
         "profile_digest": prof.digest,
     }
 

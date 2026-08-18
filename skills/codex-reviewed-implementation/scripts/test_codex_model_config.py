@@ -219,6 +219,65 @@ def test_resolve_require_config_without_any_config_fails_loud(tmp_path):
     raise AssertionError("expected E_CONFIG_MISSING")
 
 
+def test_resolve_require_config_accepts_cli_default_sentinel(tmp_path):
+    # The remediation message itself recommends `--model cli-default`; it
+    # must satisfy --require-config (the decision is pinned), even though the
+    # sentinel normalizes model to None.
+    p = cmc.resolve_profile(
+        cli_model=cmc.CLI_DEFAULT, worktree=_wt(tmp_path), require_config=True,
+        codex_home=_user_home(tmp_path),
+    )
+    assert p.model is None
+    assert p.resolution_source == "cli_flag"
+
+
+def test_resolve_binds_user_pin_value_not_just_presence(tmp_path):
+    # Doctor certifies under pin A; the user config later changes to pin B.
+    # The digest MUST differ, or the stale receipt authorizes the B review.
+    def _home(name, pin):
+        h = tmp_path / name; h.mkdir()
+        (h / "config.toml").write_text(f'model = "{pin}"\n', encoding="utf-8")
+        return str(h)
+
+    home_a = _home("home-a", "gpt-5.6-sol")
+    home_b = _home("home-b", "gpt-5.6-terra")
+    a = cmc.resolve_profile(worktree=_wt(tmp_path), codex_home=home_a)
+    b = cmc.resolve_profile(worktree=_wt(tmp_path), codex_home=home_b)
+    assert a.native_model_pin == "gpt-5.6-sol"
+    assert b.native_model_pin == "gpt-5.6-terra"
+    assert a.digest != b.digest
+    # a pinned -m makes the user pin irrelevant: no extra binding
+    m = cmc.resolve_profile(cli_model="gpt-5.4", worktree=_wt(tmp_path), codex_home=home_a)
+    assert m.native_model_pin is None
+
+
+def test_resolve_rejects_bad_codex_profile_stably(tmp_path):
+    try:
+        cmc.resolve_profile(
+            cli_model="gpt-5.6-luna", cli_codex_profile="bad profile",
+            worktree=_wt(tmp_path), codex_home=_user_home(tmp_path),
+        )
+    except cmc.ConfigError as exc:
+        assert "codex_profile" in str(exc)
+        return
+    raise AssertionError("expected ConfigError for invalid codex_profile")
+
+
+def test_write_config_atomic_no_overwrite_under_race(tmp_path, monkeypatch):
+    # Even if the early existence check is fooled (racy concurrent run), the
+    # atomic link step must still refuse to replace without --force.
+    path = str(tmp_path / ".codex-review.toml")
+    cmc.write_config(path, model="gpt-5.6-luna")
+    monkeypatch.setattr(os.path, "exists", lambda p: False)  # simulate the race
+    try:
+        cmc.write_config(path, model="gpt-5.6-terra")
+    except cmc.ConfigError as exc:
+        assert "E_CONFIG_EXISTS" in str(exc)
+        assert cmc.load_config(path)["model"] == "gpt-5.6-luna"  # untouched
+        return
+    raise AssertionError("expected E_CONFIG_EXISTS despite fooled existence check")
+
+
 def test_resolve_malformed_project_config_is_always_loud(tmp_path):
     wt = _wt(tmp_path)
     (Path(wt) / ".codex-review.toml").write_text("version = oops\n", encoding="utf-8")

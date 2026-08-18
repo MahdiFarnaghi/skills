@@ -890,6 +890,41 @@ def test_verify_doctor_receipt_rejects_cross_profile(tmp_path):
     assert any("doctor" in e.lower() for e in errors)  # actionable remediation
 
 
+def test_verify_doctor_receipt_rejects_user_pin_drift(tmp_path):
+    # Doctor certified while the user config pinned model A; the user later
+    # pins model B. The receipt must NOT authorize the B review.
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "config.toml").write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+    prof_a = cmc.resolve_profile(worktree=str(tmp_path), codex_home=str(home))
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=prof_a),
+        "outcome": "passed",
+    }))
+    (home / "config.toml").write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+    prof_b = cmc.resolve_profile(worktree=str(tmp_path), codex_home=str(home))
+    errors = rcr.verify_doctor_receipt(
+        str(receipt), profile=prof_b,
+        runner=FakeRunner(worktree=str(tmp_path)),
+    )
+    assert any("native_model_pin" in e for e in errors)
+    assert any("profile_digest" in e for e in errors)
+
+
+def test_main_doctor_rejects_bad_codex_profile_stably(monkeypatch, tmp_path, capsys):
+    # Invalid --codex-profile must surface as a stable config error from the
+    # resolution seam — never a traceback from the exec-vector builder.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    code = rcr.main([
+        "doctor", "--worktree", str(tmp_path), "--schema", "s.json",
+        "--receipt", str(tmp_path / "d.json"),
+        "--model", "gpt-5.6-luna", "--codex-profile", "bad profile",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "codex_profile" in captured.out + captured.err
+
+
 def test_verify_doctor_receipt_legacy_receipt_names_remediation(tmp_path):
     # A pre-Phase-7 receipt lacks the profile keys entirely: it must fail as
     # doctor_required with the re-doctor fix, never silently pass.

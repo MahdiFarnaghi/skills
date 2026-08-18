@@ -91,6 +91,26 @@ def test_cached_catalog_bad_models_shape_degrades(tmp_path):
     assert out["models"] == []
 
 
+def test_list_models_serves_cached_pricing_with_native_models(tmp_path):
+    # After a --refresh persists pricing, a plain list-models with native
+    # data present must still show the pricing (the offline cache must not
+    # lose its annotations the moment the native cache exists).
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps(NATIVE_FIXTURE), encoding="utf-8")
+    webpage = ("<html><body><h2>gpt-5.6-luna</h2>"
+               "<p>$1.25 / Input MTok &middot; $10 / Output MTok</p></body></html>")
+    cat.list_models(
+        refresh=True, codex_home=str(home), cache_base=str(tmp_path / "c"),
+        fetch=lambda url, timeout: webpage,
+    )
+    # plain call, no refresh: native models + cached pricing
+    out = cat.list_models(codex_home=str(home), cache_base=str(tmp_path / "c"))
+    assert out["source"] == "native"
+    luna = next(m for m in out["models"] if m["slug"] == "gpt-5.6-luna")
+    assert luna.get("input_price_per_mtok") == 1.25
+    assert luna.get("output_price_per_mtok") == 10.0
+
+
 def test_list_models_page_only_refresh_labels_source_web(tmp_path):
     # Native cache absent + page parsed: the output is honest about coming
     # from the webpage (no CLI compatibility info), labeled "web".

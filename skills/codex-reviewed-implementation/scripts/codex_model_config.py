@@ -182,6 +182,12 @@ def load_config(path: str) -> dict[str, Any]:
             f"E_CONFIG_MALFORMED: config {path} key 'codex_profile' must be a "
             f"string, got {codex_profile!r}.",
         )
+    # Shape-check values at load too (not just type): an invalid profile name
+    # must fail as a stable config error here, not as a traceback later when
+    # the exec vector is built.
+    validate_policy_values(
+        model=data.get("model"), reasoning_effort=effort, codex_profile=codex_profile,
+    )
 
     return data
 
@@ -195,10 +201,18 @@ class ExecutionProfile:
     """The canonical record of what a Codex invocation will run.
 
     ``digest`` hashes only the execution-affecting fields (model,
-    reasoning_effort, codex_profile, config_version) — provenance
-    (``resolution_source``) and advisory metadata never change authorization.
-    ``model`` is ``None`` when no ``-m`` is passed (the CLI chooses; also the
-    normalized form of the ``cli-default`` sentinel).
+    reasoning_effort, codex_profile, config_version, native_model_pin) —
+    provenance (``resolution_source``) and advisory metadata never change
+    authorization. ``model`` is ``None`` when no ``-m`` is passed (the CLI
+    chooses; also the normalized form of the ``cli-default`` sentinel).
+
+    ``native_model_pin`` records the fail-soft-read user ``config.toml`` pin
+    WHEN it is the effective model (no ``-m``, no project model). Binding its
+    value — not just its presence — closes the drift hole where a doctor
+    receipt certified under pin A still authorizes a review the CLI would run
+    under pin B after the user edits their config. ``None`` when a ``-m``
+    overrides, a project model is pinned, or no pin is readable (the truly
+    unpinned ``cli_default`` case carries no extra binding by design).
     """
 
     model: str | None
@@ -206,6 +220,7 @@ class ExecutionProfile:
     codex_profile: str | None
     config_version: int | str  # file version, or the "none" sentinel
     resolution_source: str  # cli_flag | project_config | user_config | cli_default
+    native_model_pin: str | None = None
 
     def __post_init__(self) -> None:
         # Normalize the cli-default sentinel: identical execution → identical
@@ -221,6 +236,7 @@ class ExecutionProfile:
                 "reasoning_effort": self.reasoning_effort,
                 "codex_profile": self.codex_profile,
                 "config_version": self.config_version,
+                "native_model_pin": self.native_model_pin,
             },
             sort_keys=True,
         )
@@ -235,6 +251,7 @@ class ExecutionProfile:
             "codex_profile": self.codex_profile,
             "config_version": self.config_version,
             "resolution_source": self.resolution_source,
+            "native_model_pin": self.native_model_pin,
             "profile_digest": self.digest,
         }
 
@@ -306,6 +323,20 @@ def resolve_profile(
             config = load_config(path)  # loud on malformed
             config_version = config["version"]  # load_config guarantees int 1
 
+    # Read the user pin once. It is bound into the identity only when it IS
+    # the effective model (no -m and no project model) — otherwise it would
+    # invalidate receipts for runs it never affected.
+    native_pin = _read_user_model_pin(codex_home)
+
+    def _checked(profile: ExecutionProfile) -> ExecutionProfile:
+        # Stable config errors at the resolution seam (never a traceback from
+        # the exec-vector builder later).
+        validate_policy_values(
+            model=profile.model, reasoning_effort=profile.reasoning_effort,
+            codex_profile=profile.codex_profile,
+        )
+        return profile
+
     has_cli = any(v is not None for v in (cli_model, cli_effort, cli_codex_profile))
     if has_cli:
         profile = ExecutionProfile(
@@ -316,35 +347,42 @@ def resolve_profile(
             else config.get("codex_profile"),
             config_version=config_version,
             resolution_source="cli_flag",
+            native_model_pin=native_pin if (
+                cli_model is None and not config.get("model")
+            ) else None,
         )
-        # require_config gates the MODEL dimension specifically: an effort-only
-        # flag must not satisfy it while the model silently rides the native
-        # default (the exact condition Phase 7 exists to eliminate).
-        if require_config and profile.model is None:
+        # require_config gates the MODEL dimension: an effort-only flag must
+        # not satisfy it while the model silently rides the native default.
+        # An explicit `cli-default` DOES count as pinning the decision.
+        model_pinned = cli_model is not None or bool(config.get("model"))
+        if require_config and not model_pinned:
             raise ConfigError(
                 "E_CONFIG_MISSING", config_missing_message(worktree or "<worktree>")
             )
-        return profile
+        return _checked(profile)
 
     if config.get("model") or config.get("reasoning_effort") or config.get("codex_profile"):
-        return ExecutionProfile(
+        return _checked(ExecutionProfile(
             model=config.get("model"),
             reasoning_effort=config.get("reasoning_effort"),
             codex_profile=config.get("codex_profile"),
             config_version=config_version,
             resolution_source="project_config",
-        )
+            native_model_pin=native_pin if not config.get("model") else None,
+        ))
 
     if require_config:
         raise ConfigError(
             "E_CONFIG_MISSING", config_missing_message(worktree or "<worktree>")
         )
 
-    # No pinned policy: record where the effective model comes from.
-    source = "user_config" if _read_user_model_pin(codex_home) else "cli_default"
+    # No pinned policy: record where the effective model comes from, and bind
+    # the pin's VALUE so a later user-config edit cannot ride an old receipt.
+    source = "user_config" if native_pin else "cli_default"
     return ExecutionProfile(
         model=None, reasoning_effort=None, codex_profile=None,
         config_version="none", resolution_source=source,
+        native_model_pin=native_pin,
     )
 
 
@@ -403,7 +441,28 @@ def write_config(
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        if force:
+            os.replace(tmp, path)
+        else:
+            # Atomic no-overwrite: os.link fails with FileExistsError if a
+            # concurrent run installed a config between the existence check
+            # and now — the last writer must never silently replace without
+            # --force. (Filesystems without hardlink support fall back to
+            # the non-atomic path; the early existence check still guards
+            # the common case.)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise ConfigError(
+                    "E_CONFIG_EXISTS",
+                    f"E_CONFIG_EXISTS: config {path} already exists; pass "
+                    "--force to replace it (existing project policies are "
+                    "never silently overwritten).",
+                )
+            except OSError:
+                os.replace(tmp, path)
+            else:
+                os.unlink(tmp)
     except OSError:
         try:
             os.unlink(tmp)
