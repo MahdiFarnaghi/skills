@@ -1158,5 +1158,167 @@ def test_doctor_instruments_doctor_phase(tmp_path):
     assert doctor_receipt["outcome"] in ("passed", "failed")
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 — CLI subcommands (init-config / validate-config / list-models)
+# ---------------------------------------------------------------------------
+
+def test_init_config_non_interactive_writes_config(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main([
+        "init-config", "--worktree", str(wt),
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "medium",
+    ])
+    assert code == 0
+    text = (wt / ".codex-review.toml").read_text(encoding="utf-8")
+    assert 'model = "gpt-5.6-luna"' in text
+    assert 'reasoning_effort = "medium"' in text
+
+
+def test_init_config_defaults_worktree_to_cwd(tmp_path, monkeypatch):
+    wt = tmp_path / "wt"; wt.mkdir()
+    monkeypatch.chdir(wt)
+    code = rcr.main(["init-config", "--model", "gpt-5.6-luna"])
+    assert code == 0
+    assert (wt / ".codex-review.toml").exists()
+
+
+def test_init_config_without_model_fails_fast_non_interactive(tmp_path, capsys):
+    # pytest runs without a TTY: this is exactly the Claude-agent condition.
+    # The command must fail fast with the actionable template — never hang on
+    # a prompt the caller cannot answer.
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main(["init-config", "--worktree", str(wt)])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MISSING" in out.out + out.err
+    assert not (wt / ".codex-review.toml").exists()
+
+
+def test_init_config_refuses_overwrite_then_force(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    argv = ["init-config", "--worktree", str(wt), "--model", "gpt-5.6-luna"]
+    assert rcr.main(argv) == 0
+    capsys.readouterr()  # drain success output
+    again = rcr.main(argv)
+    assert again == rcr.EX_CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "--force" in captured.out + captured.err
+    assert rcr.main([*argv, "--force"]) == 0
+    assert 'model = "gpt-5.6-luna"' in (wt / ".codex-review.toml").read_text()
+
+
+def test_validate_config_prints_resolved_profile_and_level(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6-luna"\nreasoning_effort = "medium"\n',
+        encoding="utf-8",
+    )
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profile"]["model"] == "gpt-5.6-luna"
+    assert payload["profile"]["resolution_source"] == "project_config"
+    assert payload["profile"]["profile_digest"]
+    # the file is never rewritten by validation
+    assert 'model = "gpt-5.6-luna"' in (wt / ".codex-review.toml").read_text()
+
+
+def test_validate_config_missing_config_resolves_native_default(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == 0  # zero-config is a valid, recorded resolution
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profile"]["resolution_source"] in ("user_config", "cli_default")
+    assert any("no project config" in w for w in payload["warnings"])
+
+
+def test_validate_config_malformed_is_loud(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text("version = oops\n", encoding="utf-8")
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MALFORMED" in out.out + out.err
+
+
+def test_list_models_json_never_raises(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))  # no native cache
+    code = rcr.main(["list-models", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] in ("native", "cached", "none")
+    assert isinstance(payload["models"], list)
+
+
+def test_review_flags_resolve_profile(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    (tmp_path / "packet.md").write_text("# p\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_run_review(**kwargs):
+        captured.update(kwargs)
+        return rcr.ReviewResult(outcome="completed", verdict={"verdict": "approve"})
+
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", fake_run_review)
+
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", str(tmp_path / "packet.md"),
+        "--schema", str(tmp_path / "schema.json"),
+        "--output-dir", str(tmp_path / "out"),
+        "--doctor-receipt", "/dev/null",
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "high",
+    ])
+    assert code == 0
+    prof = captured["profile"]
+    assert prof.model == "gpt-5.6-luna"
+    assert prof.reasoning_effort == "high"
+    assert prof.resolution_source == "cli_flag"
+
+
+def test_review_require_config_without_config_fails(tmp_path, capsys, monkeypatch):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+        "--require-config",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MISSING" in out.out + out.err
+
+
+def test_review_without_config_records_native_default(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    captured = {}
+
+    def fake_run_review(**kwargs):
+        captured.update(kwargs)
+        return rcr.ReviewResult(outcome="completed", verdict={"verdict": "approve"})
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", fake_run_review)
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+    ])
+    assert code == 0
+    assert captured["profile"].resolution_source == "cli_default"
+    assert captured["model"] is None  # no -m passed: today's behavior preserved
+
+
 if __name__ == "__main__":
     sys.exit(subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"]).returncode)

@@ -1713,6 +1713,108 @@ def _build_observer(args: argparse.Namespace) -> QuotaObserver | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 CLI handlers
+# ---------------------------------------------------------------------------
+
+def _interactive_pick_model() -> str | None:
+    """Numbered picker for a human at a real terminal. Lazy-imports the
+    catalog (advisory, never in the review path); returns None when the
+    terminal cannot support a choice."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    import codex_model_catalog  # lazy: keeps the review path catalog-free
+
+    listing = codex_model_catalog.list_models()
+    models = listing["models"]
+    if not models:
+        print("No models available to list (advisory catalog empty).")
+        return None
+    print("Available models (advisory; API pricing may not reflect quota):")
+    for i, m in enumerate(models, start=1):
+        suffix = ""
+        if m.get("input_price_per_mtok") is not None:
+            suffix = (f"  [${m['input_price_per_mtok']}/MTok in, "
+                      f"${m.get('output_price_per_mtok')}/MTok out]")
+        print(f"  {i}. {m['slug']}{suffix}")
+    try:
+        choice = input(f"Choose 1-{len(models)}: ").strip()
+        return models[int(choice) - 1]["slug"]
+    except (ValueError, IndexError, EOFError, KeyboardInterrupt):
+        return None
+
+
+def _cmd_init_config(args: argparse.Namespace) -> int:
+    worktree = os.path.abspath(args.worktree)
+    model = args.model
+    if model is None:
+        model = _interactive_pick_model()
+        if model is None:
+            print(cmc.config_missing_message(worktree), file=sys.stderr)
+            return EX_CONFIG_ERROR
+    try:
+        cmc.write_config(
+            os.path.join(worktree, cmc.CONFIG_FILENAME),
+            model=model, reasoning_effort=args.reasoning_effort,
+            codex_profile=args.codex_profile, force=args.force,
+        )
+    except cmc.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return EX_CONFIG_ERROR
+    profile = cmc.ExecutionProfile(
+        model=model, reasoning_effort=args.reasoning_effort,
+        codex_profile=args.codex_profile, config_version=cmc.SUPPORTED_CONFIG_VERSION,
+        resolution_source="project_config",
+    )
+    print(json.dumps({
+        "config": os.path.join(worktree, cmc.CONFIG_FILENAME),
+        "profile": profile.receipt_fields(),
+    }, indent=2, sort_keys=True))
+    return EX_OK
+
+
+def _cmd_validate_config(args: argparse.Namespace) -> int:
+    worktree = os.path.abspath(args.worktree)
+    try:
+        profile = cmc.resolve_profile(worktree=worktree)
+    except cmc.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return EX_CONFIG_ERROR
+    warnings: list[str] = []
+    if not os.path.isfile(os.path.join(worktree, cmc.CONFIG_FILENAME)):
+        warnings.append(
+            "no project config; resolving the native default (recorded, warned, "
+            "never blocking) — run init-config to pin a policy"
+        )
+    print(json.dumps({
+        "profile": profile.receipt_fields(),
+        "warnings": warnings,
+    }, indent=2, sort_keys=True))
+    return EX_OK
+
+
+def _cmd_list_models(args: argparse.Namespace) -> int:
+    import codex_model_catalog  # lazy: keeps the review path catalog-free
+
+    listing = codex_model_catalog.list_models(refresh=args.refresh)
+    if args.json:
+        print(json.dumps(listing, indent=2, sort_keys=True))
+        return EX_OK
+    for m in listing["models"]:
+        line = m["slug"]
+        if m.get("supported_efforts"):
+            line += f"  efforts: {','.join(m['supported_efforts'])}"
+        if m.get("input_price_per_mtok") is not None:
+            line += (f"  ${m['input_price_per_mtok']}/MTok in,"
+                     f" ${m.get('output_price_per_mtok')}/MTok out")
+        print(line)
+    if listing["pricing_note"]:
+        print(f"note: {listing['pricing_note']}")
+    for w in listing["warnings"]:
+        print(f"warning: {w}", file=sys.stderr)
+    return EX_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_codex_review.py",
@@ -1730,11 +1832,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     dr.add_argument("--schema", required=True)
     dr.add_argument("--receipt", required=True, help="doctor receipt/cache path")
     dr.add_argument("--timeout", type=float, default=180.0)
-    dr.add_argument("--model", default=DEFAULT_MODEL)
+    dr.add_argument("--model", default=DEFAULT_MODEL,
+                    help="model id, or 'cli-default' to keep the CLI's own choice")
+    dr.add_argument("--reasoning-effort", choices=cmc.VALID_REASONING_EFFORTS,
+                    help="native -c model_reasoning_effort override")
     dr.add_argument("--quota-observations",
                     help="Phase 6 (optional): quota observation JSONL log path outside the worktree")
     dr.add_argument("--quota-timeout", type=float, default=DEFAULT_QUOTA_TIMEOUT_SECONDS,
                     help="per-read quota timeout (default 5s, hard max 15s)")
+
+    icfg = sub.add_parser("init-config", help="write a project .codex-review.toml (Phase 7)")
+    icfg.add_argument("--worktree", default=os.getcwd(),
+                      help="worktree root (default: current directory)")
+    icfg.add_argument("--model", help="model id or 'cli-default'; required non-interactively")
+    icfg.add_argument("--reasoning-effort", choices=cmc.VALID_REASONING_EFFORTS)
+    icfg.add_argument("--codex-profile", help="native -p profile to pass through")
+    icfg.add_argument("--force", action="store_true",
+                      help="replace an existing config (never done silently)")
+
+    vcfg = sub.add_parser("validate-config", help="print the resolved execution profile")
+    vcfg.add_argument("--worktree", default=os.getcwd(),
+                      help="worktree root (default: current directory)")
+
+    lm = sub.add_parser("list-models", help="advisory model listing (never gates a review)")
+    lm.add_argument("--json", action="store_true", help="machine-readable output")
+    lm.add_argument("--refresh", action="store_true",
+                    help="refresh pricing annotation from the public catalog page")
 
     rv = sub.add_parser("review", help="run one bounded, worktree-bound read-only review")
     rv.add_argument("--review-kind", required=True, choices=VALID_REVIEW_KINDS)
@@ -1751,7 +1874,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     rv.add_argument("--schema", required=True, help="path to codex-review-output.schema.json")
     rv.add_argument("--output-dir", required=True, help="directory OUTSIDE the worktree for receipts")
     rv.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    rv.add_argument("--model", default=DEFAULT_MODEL)
+    rv.add_argument("--model", default=DEFAULT_MODEL,
+                    help="model id, or 'cli-default' to keep the CLI's own choice")
+    rv.add_argument("--reasoning-effort", choices=cmc.VALID_REASONING_EFFORTS,
+                    help="native -c model_reasoning_effort override")
+    rv.add_argument("--codex-profile", help="native -p profile to pass through")
+    rv.add_argument("--require-config", action="store_true",
+                    help="fail with E_CONFIG_MISSING unless a config or --model pins the policy (CI)")
     rv.add_argument("--state-ledger", help="path to the resumable loop-state ledger (A1)")
     rv.add_argument("--doctor-receipt", required=True, help="matching successful live-doctor receipt")
     rv.add_argument("--quota-observations",
@@ -1776,12 +1905,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  - {line}")
         return EX_PREFLIGHT_FAILED
 
+    if args.command == "init-config":
+        return _cmd_init_config(args)
+
+    if args.command == "validate-config":
+        return _cmd_validate_config(args)
+
+    if args.command == "list-models":
+        return _cmd_list_models(args)
+
     if args.command == "doctor":
+        try:
+            profile = cmc.resolve_profile(
+                cli_model=args.model, cli_effort=args.reasoning_effort,
+                cli_codex_profile=args.codex_profile, worktree=args.worktree,
+            )
+        except cmc.ConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return EX_CONFIG_ERROR
+        args.model = profile.model  # observer + receipt stay consistent
         observer = _build_observer(args)
         passed, receipt = run_doctor(
             worktree=args.worktree, schema_path=args.schema, receipt_path=args.receipt,
             timeout=args.timeout, model=args.model, quota_observer=observer,
-            codex_path=args.codex_path,
+            codex_path=args.codex_path, profile=profile,
         )
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return EX_OK if passed else EX_PREFLIGHT_FAILED
@@ -1807,9 +1954,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"ERROR: {err}", file=sys.stderr)
         return EX_INPUT_INVALID
 
+    # Phase 7: resolve the execution profile exactly once, freeze it, and
+    # pass the same object to the doctor check, the review, and the quota
+    # observer (no layer may re-resolve and drift).
+    try:
+        profile = cmc.resolve_profile(
+            cli_model=args.model, cli_effort=args.reasoning_effort,
+            cli_codex_profile=args.codex_profile, worktree=args.worktree,
+            require_config=args.require_config,
+        )
+    except cmc.ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return EX_CONFIG_ERROR
+    args.model = profile.model  # observer + receipts stay consistent
+
     doctor_errors = verify_doctor_receipt(
         args.doctor_receipt, schema_path=args.schema, model=args.model,
-        codex_path=args.codex_path,
+        profile=profile, codex_path=args.codex_path,
     )
     if doctor_errors:
         return _emit(ReviewResult(
@@ -1835,6 +1996,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             review_phase=args.review_phase,
             quota_observer=_build_observer(args),
             codex_path=args.codex_path,
+            profile=profile,
         )
     except RuntimeError as exc:
         outcome = "git_identity_failed" if any(
