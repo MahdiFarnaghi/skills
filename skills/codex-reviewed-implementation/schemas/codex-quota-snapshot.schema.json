@@ -42,6 +42,26 @@
     "model": {
       "type": ["string", "null"]
     },
+    "reasoning_effort": {
+      "type": ["string", "null"],
+      "description": "Phase 7 execution profile: native reasoning-effort override in effect for this invocation."
+    },
+    "codex_profile": {
+      "type": ["string", "null"],
+      "description": "Phase 7 execution profile: native -p profile pass-through in effect for this invocation."
+    },
+    "config_version": {
+      "type": ["integer", "string", "null"],
+      "description": "Phase 7 execution profile: project config version, or the 'none' sentinel for config-less runs."
+    },
+    "resolution_source": {
+      "type": ["string", "null"],
+      "description": "Phase 7 execution profile: where the model policy resolved from (cli_flag | project_config | user_config | cli_default)."
+    },
+    "profile_digest": {
+      "type": ["string", "null"],
+      "description": "Phase 7 execution profile: digest over execution-affecting fields; correlates this observation with receipts and ledger rounds."
+    },
     "review_kind": {
       "type": ["string", "null"],
       "enum": ["plan", "milestone", null],

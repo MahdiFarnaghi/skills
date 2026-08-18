@@ -1,4 +1,156 @@
+<!-- /autoplan restore point: /Users/m.farnaghi/.gstack/projects/MahdiFarnaghi-skills/main-autoplan-restore-20260818-123056.md -->
 <!-- /autoplan restore point: /Users/m.farnaghi/.gstack/projects/MahdiFarnaghi-skills/main-autoplan-restore-phase4-20260812-224941.md -->
+
+# Phase 7 — Execution-profile resolution and recorded model policy [implemented 2026-08-18, branch worktree-phase7-model-config]
+
+> **REFRAMED 2026-08-18 (autoplan user decision, gate D5).** The original
+> design — a bespoke `.codex-review.toml` precedence chain with a webpage
+> catalog scraper, cost display, and an `[escalation]` section — was reviewed
+> by three dual-voice phases (Codex + Claude subagent each; 6/6 consensus per
+> phase; see "/autoplan Review — Phase 7" below). All voices found the problem
+> real (reviews silently run whatever `~/.codex/config.toml` pins; receipts
+> record `model: null`; the 2026-08-16 quota incident left no trace of the
+> effective model) but the solution over-built against native codex surfaces.
+> The user adopted the reframe: **resolve-and-record the effective model
+> everywhere, translate project policy to native flags, keep the catalog
+> advisory, cut `[escalation]`.** The original specification remains in Git
+> history.
+
+## Outcome
+
+1. **Recorded resolution.** Every doctor receipt, review receipt, ledger
+   round, and quota observation records a canonical `ExecutionProfile`:
+   `{model, reasoning_effort, config_version, resolution_source, profile_digest}`
+   — where `resolution_source` ∈ {`cli_flag`, `project_config`, `skill_defaults`,
+   `user_config`, `cli_default`}. A review can never again run without leaving
+   a trace of exactly which model and effort executed it.
+2. **Thin policy translation.** The project file selects policy; the wrapper
+   translates it to native flags only: `-m <model>`,
+   `-c model_reasoning_effort="<level>"`, and (pass-through) `-p <profile>` /
+   `--codex-config key=value`. The wrapper does not re-implement model
+   resolution the CLI already performs.
+3. **Profile-bound authorization.** Doctor receipts, review receipts, and
+   ledger round claims all bind `profile_digest`. A receipt for one profile
+   never authorizes another — including via the replay path. A mid-milestone
+   profile change advances to a new round; it never crashes the ledger.
+
+## Resolution precedence
+
+1. Explicit CLI options: `--model <id|cli-default>`, `--reasoning-effort <level>`,
+   `--codex-profile <name>`, `--codex-config <k=v>` (repeatable).
+2. The target worktree's `.codex-review.toml` (malformed config is a loud
+   error naming the offending key — never a silent fall-through).
+3. Skill-wide `config/defaults.toml` — ships **without** a model pin (commented
+   example only); skill updates can never invalidate project receipts.
+4. Non-interactive with no configuration: resolve the **native default**
+   explicitly (record `resolution_source=user_config|cli_default`), record it,
+   warn once. Hard failure happens only when the operator passes
+   `--require-config` (CI). Zero-config fresh projects keep working.
+5. Interactive selection (TTY only) — `init-config` for humans; the agent
+   bootstrap path is non-interactive (`init-config --model <id>
+   --reasoning-effort <level>`, idempotent, refuses overwrite without
+   `--force`).
+
+`model = "cli-default"` is a first-class sentinel restoring today's behavior;
+it never rots. Exact IDs remain the default recommendation for receipt
+stability; aliases are rejected at validation with the concrete replacement.
+
+## Configuration (closed schema)
+
+```toml
+version = 1
+model = "gpt-5.6-luna"          # or "cli-default"
+reasoning_effort = "medium"
+codex_profile = "review"         # optional native -p pass-through
+```
+
+No `[escalation]` (cut — no defined consumer; reintroduce only with a tested
+deterministic trigger). No `[metadata]` catalog timestamps in the
+version-controlled file — provenance lives in the cache. Read with `tomllib`
+(unknown keys rejected); write with a closed-schema emitter (JSON-string
+escaping, parse-back validation, atomic same-dir replace).
+
+## Advisory discovery
+
+```text
+run_codex_review.py init-config [--worktree <path>] [--model <id>] [--reasoning-effort <e>] [--force]
+run_codex_review.py list-models [--refresh] [--json] [--source native|cached|web]
+run_codex_review.py validate-config [--worktree <path>]   # prints resolved profile + winning level; never rewrites
+```
+
+`~/.codex/models_cache.json` is the primary source for CLI-matched slugs and
+`supported_reasoning_levels` — read fail-soft (it is an undocumented artifact;
+codex 0.146.0's own reader currently fails on it). The OpenAI models webpage is
+pricing annotation only, fetched on `--refresh`, labeled "API pricing; may not
+reflect subscription quota". Cache lives under
+`$XDG_CACHE_HOME/codex-reviewed-implementation/` — never inside a reviewed
+worktree. The catalog module is import-isolated from the review execution path
+(test-enforced). Catalog health can degrade display only; **the doctor is the
+sole validator of a profile.**
+
+## Enforcement and receipts
+
+- One canonical `ExecutionProfile` + digest, resolved exactly once in `main()`
+  (frozen; passed to doctor, review, ledger, quota reader — no TOCTOU drift).
+- Doctor receipts and ledger claims gain `reasoning_effort`, `config_version`
+  (sentinel `"none"` for config-less runs), `resolution_source`,
+  `profile_digest`. Legacy receipts/ledgers fail as `doctor_required` /
+  legacy-round-rerun with the exact remediation command — never silently
+  upgraded. The upgrade invalidates existing doctor receipts once; this is a
+  documented migration cost.
+- The same exec-option builder constructs the real command vector and the
+  preflight probe vector; argv parity is test-enforced when `-m`/`-c` are
+  active. The quota reader receives the same profile (its `-c model=` form is
+  generated by the same builder).
+- Stable error codes with verbatim templates (problem + cause + runnable fix):
+  `E_CONFIG_MISSING`, `E_CONFIG_MALFORMED`, `E_MODEL_RETIRED` (suggests
+  `validate-config --suggest-upgrade` + `init-config --force`), receipt
+  mismatch prints both profiles and the exact doctor command.
+- Escalation on model uncertainty remains forbidden (unchanged).
+
+## Invariants
+
+> **As-built deltas (2026-08-18, post-implementation consistency review):**
+> (1) `--codex-config <k=v>` from precedence level 1 was **not** implemented —
+> `--codex-profile` pass-through covers the native-profile case; arbitrary
+> `-c` overrides need digest semantics decided first (deferred to TODOS.md).
+> (2) `list-models --source` is a reported output field (`native|web|cached|
+> none`), not an input flag. (3) `E_MODEL_RETIRED` ships as an advisory
+> `validate-config` warning (alias/retired hint) rather than a distinct code;
+> no `--suggest-upgrade` flag yet. (4) The quota reader pins the same resolved
+> **model** as the reviewer but does not yet receive effort/profile flags —
+> full reader/reviewer profile parity is deferred (TODOS.md); plan text below
+> stating the `-c model=` form "is generated by the same builder" is not yet
+> true as-built.
+
+1. Discovery is advisory; it can never bypass, block, or delay doctor, schema,
+   scope, or read-only safeguards. Execution validity is decided by the doctor
+   alone.
+2. Missing, stale, malformed, or unavailable catalog data degrades display
+   only — it can never block a doctor-valid model.
+3. A project policy is authoritative for that project unless an explicit CLI
+   override is supplied; malformed policy fails loudly.
+4. Skill-wide defaults never overwrite or shadow project policies, and never
+   pin a model.
+5. The non-interactive path never blocks on a prompt; zero-config operation
+   continues to work with a recorded, warned resolution.
+
+## Deliverables
+
+```text
+skills/codex-reviewed-implementation/
+├── config/
+│   └── defaults.toml            # no model pin; commented example only
+├── references/
+│   └── codex-model-selection.md # precedence, error codes, message templates
+├── scripts/
+│   ├── codex_model_config.py    # resolution, closed-schema TOML, subcommands
+│   ├── codex_model_catalog.py   # advisory discovery (fail-soft, import-isolated)
+│   ├── run_codex_review.py      # profile binding: receipts, ledger, replay, probe
+│   ├── test_codex_model_config.py
+│   └── test_run_codex_review.py # +26 new / 3 updated (see test-plan artifact)
+└── SKILL.md                     # "Choose and configure the Codex model" + agent decision tree
+```
 
 # Phase 6 — Quota observation milestone (transport v2)
 
@@ -2819,25 +2971,580 @@ one-paragraph justification for why Phase 5's direction is insufficient.
 - [ ] **X4/X5 (P2)** — Mandate 4-part `TRANSPORT_BLOCKED` message; write checkpoint ledger pre-delegation.
 - [ ] **WS1-promotion (P1)** — Promote Workstream 1 (transport spike) to a standalone go/no-go gate before workstreams 2-8 are designed.
 
+# /autoplan Review — Phase 7 (Project-configurable model selection)
+
+Scope of this review: **Phase 7 only** (the topmost section). Phases 3-6 are
+history. Review run 2026-08-18 with Codex CLI 0.146.0 (gpt-5.6-sol) + Claude
+subagent dual voices. Transport facts verified against the working tree and the
+live CLI. Premise gate: user confirmed all four premises (D4) before dual
+voices ran; the voices subsequently surfaced native-surface evidence that
+challenges the plan's direction (see USER CHALLENGE).
+
+## Verified transport facts (empirical, 2026-08-18)
+
+- `run_codex_review.py:66` — `DEFAULT_MODEL = None  # let the Codex CLI choose`.
+  `--model` exists on doctor (:1593) and review (:1614); `-m` added at :260.
+  No `--ignore-user-config`, so the user's `~/.codex/config.toml`
+  (`model = "gpt-5.6-sol"`, `model_reasoning_effort = "low"`) silently governs
+  every review today. Receipts bind the *flag value* (`model: null`), so the
+  actually-used model is unrecorded — the 2026-08-16 quota-attribution incident
+  left no local trace of which model ran.
+- `~/.codex/models_cache.json` exists (174 KB, refreshed same-day, fields:
+  `client_version`, `etag`, `fetched_at`, `models[]` with `slug`,
+  `display_name`, `default_reasoning_level`, `supported_reasoning_levels[]`
+  low/medium/high/xhigh/max). It is CLI-version-matched — exactly the
+  compatibility source the plan lacks — but carries **no pricing**.
+- `codex exec --help` documents `-c model="o3"` overrides and `-p/--profile
+  <CONFIG_PROFILE_V2>`. `~/.codex/config.toml:137` carries
+  `[notice.model_migrations]` — OpenAI actively migrates models.
+- The plan's catalog URL (developers.openai.com/api/docs/models) is
+  **server-rendered** with model IDs, independent input/output per-MTok prices,
+  reasoning scales, and alias markers — but says nothing about CLI
+  compatibility or account entitlement.
+- codex 0.146.0's own stderr during this review: `failed to load models cache:
+  missing field 'base_instructions'` — the CLI's own cache reader currently
+  fails on its own cache. models_cache.json is a churning internal artifact;
+  any reader must be fail-soft.
+
+## Phase 1 — CEO Review
+
+### 0A-0F (Step 0)
+
+Premises: (1) implicit model selection is a real bug — VERIFIED (model:null
+receipts can silently drift; live quota incident). (2) catalog webpage usable —
+VERIFIED feasible, but both voices show it is the wrong *authority* (docs ≠
+entitlement/compatibility). (3) interactive selection fenced to operator use —
+correct, but level-5 fail-closed regresses fresh-project zero-config operation
+(subagent F6; Codex F5). (4) `[escalation]` has no defined consumer — both
+voices: cut or subsume. Mode: SELECTIVE EXPANSION (auto). Approach recommended:
+A-with-fallback (full precedence + binding, catalog advisory with bundled
+static fallback).
+
+### CEO DUAL VOICES — consensus table
+
+6/6 CONFIRMED, 0 disagreements. Both voices REJECT AS WRITTEN and converge on
+"thin policy layer over native surfaces." Claude subagent: 10 findings (2
+critical, 4 high, 4 medium) — mis-framed as control instead of observability;
+native surfaces (models_cache.json, -p, -c, migration notices) ignored;
+scraping brittle; pins break on churn; interactive path dead in primary mode;
+API prices ≠ quota costs; [escalation] half-specified; baseline misstated
+(model binding already exists — reasoning_effort + config_version are the
+delta). Codex: 14 findings (3 critical, 5 high, 6 medium) — parallel config
+system competes with native; catalog ≠ usable-by-this-account; exact pins
+cause predictable outages; precedence internally inconsistent (defaults.toml
+makes level 5 unreachable); intent tiers (fast/standard/high-risk) beat raw
+model IDs; catalog metadata pollutes reviewable config; named-policy tier
+undefined; receipts under-bound.
+
+### Sections 1-10 (auto-decided)
+
+**S1 Architecture.** The precedence chain CLI > project > defaults > interactive
+> fail is clean, but level 3 (defaults.toml) renders level 5 unreachable — a
+defaults file shipped with the skill always exists (Codex F5, CONFIRMED).
+Auto-decide (P5): `defaults.toml` ships with **no model pin** (commented
+example only), so resolution genuinely falls through; a pinned default becomes
+an explicit operator act. Second architecture gap (subagent F6, CONFIRMED):
+non-interactive + no config hard-fails every fresh project, regressing the
+Phase 5 zero-config guarantee and reintroducing run-init-once-by-hand
+middleware. Auto-decide (P1/P6): non-interactive no-config resolves the
+**native default explicitly** (record `resolution_source=cli_or_user_config`),
+records the resolved model in the receipt, and warns — hard fail only when the
+operator explicitly passes `--require-config` (CI). Taste → surfaced. Catalog
+module must be import-isolated from the review path (enforce with an import
+test, not prose).
+
+**S2 Error & Rescue Map.** Registry below. Key GAP (both voices, CONFIRMED):
+invariant 2 lets catalog staleness block a pinned, doctor-valid model — the
+exact Phase 6 fail-closed mistake refuted 3-for-3 on 2026-08-13. Auto-decide
+(P5): catalog health is **advisory only**; execution validity is decided
+solely by the doctor. A stale/malformed cache degrades list-models display,
+never a review.
+
+**S3 Security.** Webpage-as-untrusted-data is specified and correct; add
+escaping of catalog-derived strings in any human display (prompt-injection
+surface via model descriptions). New threat, LOW likelihood / MED impact: a
+malicious repo PR pins an expensive or weak model in `.codex-review.toml`
+(cost DoS / review-quality downgrade). Mitigated by: small reviewable diff,
+`validate-config` in CI, doctor-bound receipt. Catalog cache is non-sensitive
+(0644 acceptable; document the contrast with the 0600 quota store).
+
+**S4 Data-flow edge cases.** init-config without TTY → print remediation, exit
+nonzero (never block). Existing `.codex-review.toml` → refuse overwrite
+without `--force` (matches invariant 4). Corrupt cache → serve stale with
+`stale=true` marker. Cache writes atomic (tmp+rename). `validate-config` on
+missing file → exit 1 with exact precedence resolution printed.
+
+**S5 Code quality.** run_codex_review.py is 1710 lines; adding three
+subcommands + resolution logic inline grows a god-file. Auto-decide (P5):
+config resolution + subcommands live in a new module
+(`codex_model_config.py`); run_codex_review.py stays CLI glue. Deliverables
+list updated accordingly.
+
+**S6 Test review.** Test diagram produced (see Phase 3). The plan's single
+test file under-covers: catalog parse fixtures, cache staleness, cost-ratio
+math, receipt profile-binding rejection, precedence permutations, TTY
+detection, import-isolation, migration-warning. Auto-decide (P1): enumerate as
+required tests; no eval suites apply (no prompt changes).
+
+**S7 Performance.** Discovery is init-time only; enforced off the review hot
+path by test. Staleness checks are mtime reads. No perf findings beyond that
+enforcement.
+
+**S8 Observability.** The plan records the resolved profile in receipts and
+quota observations — good — but not **where it resolved from**. Auto-decide
+(P1, subagent F1): record `resolution_source` ∈ {cli_flag, project_config,
+skill_defaults, user_config, cli_default} on every receipt and observation.
+This is the one-change-makes-the-incident-diagnosable fix.
+
+**S9 Deployment.** Extending doctor receipts with reasoning_effort +
+config_version invalidates existing doctor receipts (key change) — one-time
+re-doctor on upgrade; document in the rollout note. defaults.toml updates must
+not touch project files (invariant 4) — tested, not promised.
+
+**S10 Long-term.** Reversibility 4/5 (additive files; removing config returns
+to current behavior). Pin-rot is the debt (both voices critical/high):
+auto-decided mitigation — exact pins stay, but `validate-config` warns on
+retired/migrated models using models_cache.json + `[notice.model_migrations]`
+data, and `init-config --refresh` rewrites the pin after explicit
+confirmation. Strict-alias ban stays (aliases defeat receipt binding).
+
+### Error & Rescue Registry (Phase 7 codepaths)
+
+| Codepath | Failure | Class | Rescued? | Action | User sees |
+|---|---|---|---|---|---|
+| catalog fetch | timeout / non-200 / layout change | CatalogError | Y | serve cached/static, mark stale | "catalog unavailable — showing cached list (stale)" |
+| catalog parse | fields missing / injection text | ParseError | Y | skip entry, redact strings | entry omitted + warning |
+| cache read | corrupt JSON | CacheError | Y | treat as absent | "cache corrupt — refreshing" |
+| cache write | IO error | CacheError | Y | skip cache, continue | warning only |
+| config read | malformed TOML / unknown version | ConfigError | Y (fail-closed) | exit 2, name offending key | actionable message + doc link |
+| config validate | alias pinned / effort unsupported | ConfigError | Y (fail-closed) | exit 2 | "gpt-5.6 is an alias — pin gpt-5.6-sol" |
+| resolution | no config, non-interactive | ResolutionError | Y | resolve native default, record source, warn (hard fail only with --require-config) | warning line in receipt |
+| receipt check | profile mismatch | ProfileMismatch | Y (fail-closed) | reject receipt | "receipt bound to different profile — re-run doctor" |
+| init-config | no TTY | TTYError | Y | print command, exit 1 | remediation text |
+
+### Failure Modes Registry (Phase 7)
+
+| # | Failure mode | Sev | Detected? | Tested? | Silent? |
+|---|---|---|---|---|---|
+| F1 | model drift between doctor and review (model:null today) | HIGH | after fix: yes (profile binding) | must add | was silent — the incident |
+| F2 | retired pinned model bricks CI | HIGH | validate-config warning | must add | no |
+| F3 | catalog layout change breaks init-config | MED | stale marker | must add | no |
+| F4 | catalog staleness blocks valid review (invariant 2 as written) | HIGH | — | must NOT block | would be a hard block (Phase 6 mistake) |
+| F5 | malicious PR pins costly model | MED | PR review + validate-config | must add | no |
+| F6 | fresh project hard-fails in non-interactive mode | HIGH | — | must add | no (loud, but a regression) |
+| F7 | models_cache.json schema churn (live: CLI's own reader failing) | MED | fail-soft read | must add | no |
+
+### Mandatory outputs
+
+**NOT in scope (Phase 7):** quota-attribution flags (separate investigation,
+may have no public surface); effort-tier abstraction beyond `[escalation]`
+(Codex F6 — revisit if reframe adopted); Phase 4; pricing from quota
+observations (Phase 6 store already collects the data).
+
+**What already exists:** `--model` plumbing (doctor/review/reader), model
+binding in doctor_key (:1027) and SKILL.md:30 contract, deterministic
+validation CLI pattern, 0600/atomic/locked store pattern, `tomllib` stdlib
+reads. Missing only: reasoning_effort, config_version, resolution_source, any
+config file, any catalog.
+
+**Dream state delta:** plan (as written) lands model-config machinery; the
+voices' reframe lands the "execution profile" abstraction's first instance
+with native alignment — closer to the 12-month ideal.
+
+### Phase 1 decision audit trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|-------|----------|----------------|-----------|-----------|----------|
+| 1 | CEO | Premise gate: confirm premises | USER GATE — answered | — | D4 answered "Confirm all" | — |
+| 2 | CEO | defaults.toml ships without model pin | Taste | P5 explicit | keeps precedence levels reachable | pinned default |
+| 3 | CEO | Non-interactive no-config → resolve+record+warn; hard fail only with --require-config | Taste (HIGH) | P1/P6 | avoids Phase 5 zero-config regression | hard fail always |
+| 4 | CEO | Catalog health advisory-only; doctor is sole validator | Taste (HIGH) | P5 | Phase 6 fail-closed precedent | invariant-2-as-written |
+| 5 | CEO | Config resolution in new codex_model_config.py module | Mechanical | P5 | 1710-line god-file | inline growth |
+| 6 | CEO | Record resolution_source on receipts/observations | Mechanical (HIGH) | P1 | makes incidents diagnosable | flag-value only |
+| 7 | CEO | Exact pins + retirement warning + confirmed refresh | Taste | P1 | pins bind receipts; churn needs a rail | alias ban relaxed |
+| 8 | CEO | Import-isolate catalog from review path (test-enforced) | Mechanical | P5 | plan promise → machine-checked | prose-only |
+| 9 | CEO | REFRAME Phase 7 to thin native layer | **USER CHALLENGE** | — | both voices reject as written | surfaced at gate |
+
+## Phase 3 — Eng Review
+
+### Step 0 — Scope challenge
+
+Existing code covers model plumbing, doctor receipt model binding, deterministic
+validation patterns, and store mechanics (see "What already exists"). Minimum
+viable change: resolution + profile binding + fail-closed config validation.
+Complexity: ~6 files, 2-3 new modules — under the 8-file smell threshold, but
+the integration surface (doctor, review, ledger, replay, quota, preflight) is
+7 touch-points in one file, which is the real complexity driver. No WebSearch
+needed: live probes beat documentation here (models_cache.json, config.toml,
+exec --help all read directly).
+
+### ENG DUAL VOICES — CONSENSUS TABLE
+
+```
+═══════════════════════════════════════════════════════════════════════════════
+  Dimension                              Claude subagent        Codex
+  ────────────────────────────────────── ────────────────────── ──────────────
+  1. Architecture sound?                 fits, NOT implement-   same + 3 critical
+                                         able as written        integration holes
+  2. Test coverage sufficient?           matrix of 9 gaps       matrix of 12 gaps
+  3. Performance risks?                  discovery off hot      same + TOCTOU single
+                                         path only              resolution
+  4. Security threats covered?           TOML injection,        + cache containment,
+                                         malicious PR pin       native-profile conflicts
+  5. Error paths handled?                catalog nil-matrix      + config exit codes
+                                         undefined
+  6. Deployment risk manageable?         receipt invalidation   + ledger migration
+                                         wave                   policy
+═══════════════════════════════════════════════════════════════════════════════
+Consensus: 6/6 CONFIRMED, 0 disagreements. Verdict (both): the design fits the
+codebase's fail-closed receipt-bound architecture, but Phase 7 is NOT
+implementable as written until one canonical execution-profile identity and its
+migration, replay, probe, quota, cache, TOML, and test contracts are defined.
+Source: codex+subagent.
+```
+
+Convergent criticals (both voices independently): ledger replay is not
+profile-bound (`claim_round` :809/:1272 omits model; replay :826-835 returns
+stored receipts unchecked — "one receipt must not authorize another profile" is
+already violated today); doctor-receipt migration semantics absent (adding keys
+invalidates every existing receipt — acceptable only if documented, legacy must
+fail as `doctor_required` with actionable message, config-less runs need a
+`"none"` sentinel); preflight arg-probe (:985-998) hardcodes the flag vector
+and will certify a surface different from what runs once `-c` overrides appear.
+
+### Section 1 — Architecture (dependency graph)
+
+```
+                        ┌──────────────────────────────────────────────┐
+                        │  codex_model_config.py  (NEW)                │
+                        │  resolve_profile(flags, worktree) -> Profile │
+                        │  Profile = {model, effort, config_version,   │
+                        │             resolution_source, digest}       │
+                        │  read:  tomllib (strict, unknown-key reject) │
+                        │  write: closed-schema emitter + parse-back   │
+                        └───────┬──────────────────────────────────────┘
+                                │ frozen once in main(); passed everywhere (TOCTOU)
+        ┌───────────────────────┼─────────────────────────────────┐
+        ▼                       ▼                                 ▼
+  build_command()         doctor_key()                      claim_round() ledger
+  run_codex_review.py:236 run_codex_review.py:1027          :809/:1272
+  gains -c effort=        gains effort+config_version        gains profile digest;
+  (probe vector built     +resolution_source+digest          replay verifies digest;
+  by SAME builder)        legacy → doctor_required           profile change → NEW
+        │                       │                            round, not RuntimeError
+        ▼                       ▼                                 ▼
+  preflight probe          review receipt :1377-1500      replayed receipt :826-835
+  parity-tested            + quota meta :1490              digest-checked
+        │                       │
+        │                       ▼
+        │            quota_observation.META_FIELDS :444-461
+        │            + schemas/codex-quota-*.json  (else fields silently dropped)
+        ▼
+  codex_model_catalog.py (NEW, ADVISORY ONLY — import-isolated from review path)
+  sources: ~/.codex/models_cache.json (compat+efforts, fail-soft)
+         + developers.openai.com/api/docs/models (pricing, --refresh only)
+  cache: $XDG_CACHE_HOME/codex-reviewed-implementation/ (NEVER inside a
+         reviewed worktree — validate_inputs :347 pattern; doctor read-only
+         check :1066 would see the cache as target mutation)
+```
+
+### Section 2 — Code quality
+
+- DRY (both voices): exactly ONE canonical Profile structure + digest, used by
+  doctor, review, ledger, quota reader, replay, and receipts. The current split
+  (`-m` for exec :259 vs `-c model=` for app-server read_codex_quota.py:201)
+  must both flow from the same profile or reader/reviewer parity breaks.
+- Exit codes: new distinct code for config errors (current enum :131-142
+  reuses EX_INPUT_INVALID). Auto-decided (P5).
+- Malformed project config = loud error, never silent fall-through to defaults
+  (invariant 3 makes project policy authoritative; a typo must not quietly
+  demote the user to skill defaults). Auto-decided (P1).
+- Semantic policy digest binds only execution-affecting normalized fields
+  (model, effort, config identity) — NOT advisory metadata (catalog timestamps
+  in `[metadata]` must not invalidate receipts; conversely `version=1` alone
+  must not let policy edits slide). Auto-decided (Codex F11, P5).
+
+### Section 3 — Test review (test diagram)
+
+```
+NEW CODEPATHS / USER FLOWS                                COVER IN PLAN?   TYPE
+[+] resolve_profile precedence
+  ├── flag > project > defaults > native-default+warn      gap → add      unit
+  ├── --require-config hard fail                           gap → add      unit
+  ├── malformed TOML → loud error, offending key           gap → add      unit
+  ├── unknown key / unknown version reject                 gap → add      unit
+  ├── alias pinned → reject + replacement suggestion       gap → add      unit
+  └── effort unsupported by model (models_cache, fail-soft) gap → add     unit
+[+] profile binding
+  ├── doctor_key extension; legacy receipt → doctor_required gap → add    unit
+  ├── cross-profile receipt rejection (effort, config_ver)  gap → add     unit
+  ├── ledger claim w/ digest; replay digest verification    gap → add     unit
+  ├── mid-milestone profile change → NEW round (no crash)   gap → add     unit (2am case)
+  └── config-less sentinel config_version="none"            gap → add     unit
+[+] exec vector
+  ├── -c model_reasoning_effort quoting (TOML value)       gap → add      unit
+  ├── preflight probe argv parity w/ -m/-c                 gap → add      unit
+  └── reader/reviewer profile parity (app-server vs exec)   gap → add     unit
+[+] observations
+  ├── META_FIELDS + schema accept new fields               gap → add      unit
+  └── report generator tolerance                            gap → add     unit
+[+] init-config
+  ├── TTY absent → fast exit + remediation                  gap → add     unit
+  ├── refuses overwrite w/o --force                         gap → add     unit
+  ├── receipt destination = standing path (no double paid)  gap → add     unit
+  └── writer escaping + parse-back + atomic replace          gap → add     unit
+[+] list-models / catalog
+  ├── offline / stale / unparsable / old-parser cache       gap → add     unit
+  ├── retired model, stale vs fresh catalog                 gap → add     unit
+  ├── models_cache.json corrupt (LIVE: CLI's own reader
+  │   fails today) → fail-soft warning                      gap → add     unit
+  └── cache path containment (worktree, symlink) + atomic   gap → add     unit
+[+] import isolation: catalog not importable from review
+    execution path                                          gap → add     unit
+EXISTING TESTS TO UPDATE
+  ├── test_build_command_flag_placement :155 (exact argv)   update
+  ├── test_build_command_model_optional :177                update
+  └── hand-written receipt JSON fixtures                    audit
+
+LLM/prompt changes: none — no eval suites apply.
+```
+
+Coverage: 26 new tests + 3 updated. Test plan artifact written to
+`~/.gstack/projects/MahdiFarnaghi-skills/m.farnaghi-main-eng-review-test-plan-20260818.md`.
+
+### Section 4 — Performance
+
+No hot-path cost: resolution is three file reads; discovery runs only at
+init/`--refresh` (import-isolated, test-enforced). The one real timing bug is
+TOCTOU (Codex F10): config read at multiple layers can bind different values to
+doctor, ledger, and review. Fix: resolve once in `main()`, freeze, pass down.
+Auto-decided (P5).
+
+### Failure Modes Registry — critical gaps
+
+| # | Failure mode | Sev | Test? | Handled? | Verdict |
+|---|---|---|---|---|---|
+| F1 | replayed old-model verdict after policy change | CRIT | must add | no (today) | **CRITICAL GAP** |
+| F2 | legacy receipts/ledgers on upgrade | CRIT | must add | unspecified | **CRITICAL GAP** |
+| F3 | mid-milestone config edit → RuntimeError | HIGH | must add | unspecified | gap |
+| F4 | fresh-project hard fail (non-interactive) | HIGH | must add | plan-as-written fails | gap (CEO D3 fix) |
+| F5 | profile fields silently dropped from observations | HIGH | must add | no (allowlist) | gap |
+| F6 | cache lands in worktree → doctor read-only fail | HIGH | must add | unspecified | gap |
+| F7 | retired pin bricks CI | HIGH | must add | partial (warning) | gap |
+| F8 | catalog staleness blocks valid review | HIGH | must NOT block | invariant-2 conflict | resolved advisory-only |
+
+### Phase 3 decision audit trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|-------|----------|----------------|-----------|-----------|----------|
+| 10 | Eng | Canonical Profile object + digest everywhere | Mechanical (CRIT) | P4/P5 | both voices; kills replay hole | per-site dicts |
+| 11 | Eng | Ledger: profile digest in claim; replay verifies; change → new round | Mechanical (CRIT) | P1 | 2am crash + auth hole | error on conflict |
+| 12 | Eng | Legacy receipts/ledgers fail doctor_required w/ message; "none" sentinel | Mechanical (CRIT) | P5 | absent ≠ explicit default | silent upgrade |
+| 13 | Eng | One exec-option builder for probe + real vector; parity tests | Mechanical (HIGH) | P5 | probe certifies what runs | hardcoded probe |
+| 14 | Eng | Extend META_FIELDS + schemas; report tolerance | Mechanical (HIGH) | P1 | silent drop otherwise | wrapper-only tests |
+| 15 | Eng | Cache under XDG_CACHE_HOME; reject in-worktree; symlink tests | Mechanical (HIGH) | P1 | fingerprints + read-only check | worktree cache |
+| 16 | Eng | tomllib read + closed-schema writer (json.dumps escaping, parse-back, atomic) | Mechanical (HIGH) | P5 | dependency-free convention | tomli-w dep |
+| 17 | Eng | Resolve once in main(); freeze profile (TOCTOU) | Mechanical (HIGH) | P5 | layer drift | reread per layer |
+| 18 | Eng | init-config: receipt dest + non-TTY fast-fail + no-overwrite | Mechanical (HIGH) | P1 | double spend + hang | prompt-and-wait |
+| 19 | Eng | Malformed config = loud error (no fall-through) | Mechanical | P1 | invariant 3 authority | silent default |
+| 20 | Eng | Semantic policy digest (execution fields only) | Taste | P5 | metadata ≠ authorization | bind whole file |
+
+## Phase 3.5 — DX Review
+
+Product type: **Claude Code Skill + CLI wrapper** (dual-user: the agent invokes
+doctor/review/preflight non-interactively; the human authors config at a
+terminal). Persona (auto): the pairing of "Claude Code as primary CLI consumer"
++ "solo senior operator as config author". Mode: **DX POLISH** (auto).
+
+### DX DUAL VOICES — CONSENSUS TABLE
+
+```
+═══════════════════════════════════════════════════════════════════════════════
+  Dimension                              Claude subagent        Codex
+  ────────────────────────────────────── ────────────────────── ──────────────
+  1. Getting started < 5 min?            CRITICAL: agent        CRITICAL: zero-to-
+                                         blocked (interactive   review unspecified
+                                         -only bootstrap)       for agent user
+  2. API/CLI naming guessable?           dangling "named        same + no --json /
+                                         policy"; no echo       output contracts
+  3. Error messages actionable?          none written; msg      same + stable codes
+                                         -spec table needed     + verbatim templates
+  4. Docs findable & complete?           SKILL.md bullet only   same + no playbook /
+                                                                 no copy-paste flow
+  5. Upgrade path safe?                  re-doctor on every     same + retirement
+                                         config edit            churn + migration
+  6. Dev-env friction-free?              catalog coupled to     same + offline init
+                                         review (contradicts)   impossible
+═══════════════════════════════════════════════════════════════════════════════
+Consensus: 6/6 CONFIRMED, 0 disagreements. Both DX voices REJECT as framed
+(consistent with CEO and Eng). Source: codex+subagent.
+```
+
+New load-bearing DX finding (both voices, critical): `init-config` is
+interactive-only, but the primary user has no TTY — the agent cannot bootstrap
+config, and the skill has no no-config decision tree. Fix: non-interactive
+`init-config --model <id> --reasoning-effort <e>` (idempotent) + documented
+agent decision tree (config exists → validate; missing → initialize with
+explicit model; impossible → one-shot `--model` override).
+
+### Passes 1-8 (scores as-written → projected after fixes)
+
+| Pass | Score | Gap to 10 (evidence) |
+|---|---|---|
+| 1 Getting started | 3/10 → 8 | agent blocked (interactive-only); human needs 6+ steps, no copy-paste session; fix = non-interactive init + one documented terminal session |
+| 2 API/CLI design | 5/10 → 8 | "named policy" dangling (cut); no `--json`/stable exit codes; `--worktree` should default to cwd; validate-config must print resolved profile + winning level |
+| 3 Error messages | 3/10 → 8 | "actionable" is aspired, never specified; fix = stable codes + verbatim templates (E_CONFIG_MISSING, receipt mismatch printing both profiles + exact doctor command) |
+| 4 Documentation | 4/10 → 8 | SKILL.md needs "Choose and configure the Codex model" section before preconditions + agent decision tree + copy-paste flows |
+| 5 Upgrade path | 3/10 → 7 | receipt invalidation on profile change undocumented; retirement → `validate-config --suggest-upgrade` + migration workflow |
+| 6 Dev environment | 4/10 → 8 | offline/CI contract contradictory; fix = review touches doctor receipt only, never the catalog; offline init via `--model` + native models_cache |
+| 7 Community | 6/10 → 6 | personal skill; examples exist; out of scope this phase |
+| 8 DX measurement | 3/10 → 5 | resolution_source recording is the one instrument; TTHW unmeasured |
+
+**DX overall: 3.9/10 as written → ~7.5 projected after fixes.**
+TTHW: agent = **blocked** as written (human handoff required); target **< 1 min
+/ zero-touch** after non-interactive bootstrap. Human: ~10-15 min → target
+< 5 min via documented session. Magical moment: "list-models with costs →
+one-command pin → doctor-validated in one session" — designed (interactive
+vehicle), but unreachable for the agent persona.
+
+### Cross-phase themes (independently flagged in 3 phases, both voices)
+
+1. **Reframe to thin native layer** — CEO (6/6), Eng (architecture-fit-under-
+   reframe), DX (reject as framed). Highest-confidence signal.
+2. **Agent-path regression** — CEO F6, Eng F4, DX critical ×2: fresh
+   non-interactive project goes from working to blocked.
+3. **Catalog authority vs advisory** — CEO F3/F4, Eng nil-matrix, DX F7/F8:
+   the plan half-treats catalog data as validation; must be display-only.
+4. **Pin rot / churn** — all three phases: exact pins without a migration
+   workflow turn platform evolution into routine breakage.
+5. **defaults.toml is the unspecified linchpin** — CEO (unreachable level 5),
+   Eng (invalidation wave), DX (both critical): the single undecided file
+   determines whether the whole precedence chain works.
+
+### Phase 3.5 decision audit trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|-------|----------|----------------|-----------|-----------|----------|
+| 21 | DX | init-config non-interactive mode (--model/--effort, idempotent) + agent decision tree in SKILL.md | Mechanical (CRIT) | P1 | primary user has no TTY | interactive-only |
+| 22 | DX | defaults.toml semantics (no-pin+resolve-native-default vs pinned floor vs remove tier) | **Taste (CRIT)** | — | invalidation wave vs determinism | surfaced at gate |
+| 23 | DX | `cli-default` sentinel + `--codex-profile`/`--codex-config` pass-through | Taste | P5 | escape hatch to today's behavior | forced exact pin |
+| 24 | DX | Error-spec table: stable codes + verbatim templates incl. receipt mismatch (both profiles + doctor cmd) | Mechanical (HIGH) | P1 | aspirational ≠ actionable | "clear message" |
+| 25 | DX | Cut "named policy" from precedence level 1 | Mechanical | P5 | undefined dangling concept | keep undefined |
+| 26 | DX | list-models --json/--source/exit codes; validate-config prints resolved profile, never rewrites | Mechanical | P1 | agent consumes programmatically | prose output only |
+| 27 | DX | SKILL.md "Choose and configure the Codex model" section + copy-paste flows | Mechanical (HIGH) | P1 | agent discovery without source read | one-line mention |
+| 28 | DX | Cut [escalation] from v1 (define trigger in a later phase) | Taste | P3 | dead config erodes trust | keep key inert |
+| 29 | DX | Drop [metadata] catalog timestamps from the version-controlled file (provenance lives in cache) | Mechanical | P5 | noisy time-dependent diffs | timestamps in repo |
+
+### DX addenda — journey map + empathy narrative (pre-gate outputs)
+
+Developer journey (dual persona):
+
+| Stage | Agent (primary) does | Human operator does | Friction | Status |
+|---|---|---|---|---|
+| Discover | reads SKILL.md preconditions | reads SKILL.md | no model-config section | gap → fix #27 |
+| Configure | (blocked: interactive-only) | runs init-config at TTY | agent cannot bootstrap | **critical → fix #21** |
+| Validate | runs validate-config | runs validate-config | no resolved-profile echo | gap → fix #26 |
+| Doctor | runs doctor w/ profile | same | receipt invalidation unexplained | gap → fix #24 |
+| Hello review | runs review | same | fresh-project fail (as written) | critical → fixes #3/#22 |
+| Real usage | repeat reviews | edits config | every edit = re-doctor (undocumented) | gap → fix #24 |
+| Debug | reads error messages | same | none specified | gap → fix #24 |
+| Upgrade | model retired | rewrites config | no suggest-upgrade path | gap → fix #23 |
+| Measure | records resolution_source | reads receipts | TTHW unmeasured | partial (#6) |
+
+Empathy narrative (agent persona, first person): "I am Claude, mid-implementation,
+in a repository I have never seen. My precondition says to run doctor with the
+same model certified before. There is no `.codex-review.toml`, no `--model` in
+my invocation, and my shell has no terminal. As written, step 5 of the
+precedence fails me with 'no configuration available' — and the cure,
+`init-config`, opens a picker I cannot answer. I have a human owner, but
+stopping to ask them for a model name is exactly the middleware this skill
+promised to eliminate. With fix #21, I run `init-config --model <from
+models_cache or prior receipt>` myself, or fall to the recorded native default,
+and the review proceeds. The difference between those two worlds is one flag."
+
+### Completion summaries (all phases)
+
+```
++====================================================================+
+|            PHASE 7 /autoplan — COMPLETION SUMMARY                  |
++====================================================================+
+| Mode                  | SELECTIVE EXPANSION (CEO) / DX POLISH      |
+| Premise gate          | PASSED (D4: confirm all)                    |
+| CEO (11 sec)          | 2+4+4 findings; consensus 6/6 CONFIRMED     |
+| Eng (4 sec)           | 3 critical replay/migration/probe; 6/6      |
+| DX (8 passes)         | 3.9/10 as written; 6/6 CONFIRMED            |
+| Voices                | 3/3 phases dual (codex + subagent)          |
+| Error/rescue registry | 9 codepaths written                         |
+| Failure modes         | 8 (2 CRITICAL GAPS: replay hole, migration) |
+| Test diagram          | 26 new + 3 updated tests; artifact on disk  |
+| Decisions logged      | 29 (1 user gate passed, 1 challenge open,   |
+|                       |  6 taste surfaced, 21 mechanical auto)      |
+| Cross-phase themes    | 5 (all 3-phase signals)                     |
+| User challenges       | 1 — REFRAME (gate decision)                 |
++====================================================================+
+```
+
+## Implementation Tasks
+
+Synthesized from this review's findings. Each task derives from a specific
+finding above. Run with Claude Code or Codex; checkbox as you ship.
+
+- [x] **G1 (P1, decision)** — Resolve the USER CHALLENGE: reframe to thin native layer vs plan as written — **user's call at the gate**
+- [x] **T1 (P1, human: ~2d / CC: ~2h)** — transport — canonical ExecutionProfile + digest across doctor/review/ledger/replay/quota
+  - Surfaced by: Eng dual voices (critical ×2) — claim_round :809/:1272 not profile-bound
+  - Files: scripts/run_codex_review.py, scripts/quota_observation.py
+  - Verify: new unit tests reject cross-profile replay + legacy receipts
+- [x] **T2 (P1, human: ~1d / CC: ~45min)** — transport — non-interactive bootstrap: init-config --model/--effort (idempotent) + agent decision tree in SKILL.md
+  - Surfaced by: DX both voices (critical) — primary user has no TTY
+  - Files: scripts/codex_model_config.py, SKILL.md
+  - Verify: stdin=DEVNULL test; fresh-project e2e without human
+- [x] **T3 (P1, human: ~1d / CC: ~45min)** — transport — error-spec: stable codes + verbatim templates (config missing/malformed, retired model, receipt mismatch with both profiles + doctor command)
+  - Surfaced by: DX both (high); Eng exit-code finding
+  - Files: scripts/codex_model_config.py, references/codex-model-selection.md
+  - Verify: message-template unit tests
+- [x] **T4 (P2, human: ~1d / CC: ~45min)** — transport — defaults.toml semantics + precedence fix (per gate decision #22) + `--require-config` CI flag
+  - Surfaced by: CEO F5 / Eng F1 / DX both — linchpin unspecified
+  - Files: config/defaults.toml, scripts/codex_model_config.py
+  - Verify: precedence permutation tests incl. fresh-project non-interactive
+- [x] **T5 (P2, human: ~4h / CC: ~20min)** — transport — single exec-option builder + preflight probe parity; reader/reviewer profile parity
+  - Surfaced by: Eng — probe :985 certifies wrong vector; reader uses -c vs -m
+  - Files: scripts/run_codex_review.py, scripts/read_codex_quota.py
+  - Verify: argv-parity tests with -m/-c active
+- [x] **T6 (P2, human: ~4h / CC: ~20min)** — transport — META_FIELDS + quota schemas accept profile fields; report tolerance
+  - Surfaced by: Eng both voices — allowlist silently drops
+  - Files: scripts/quota_observation.py, schemas/codex-quota-*.json
+  - Verify: observation record contains reasoning_effort/config_version/source
+- [x] **T7 (P2, human: ~4h / CC: ~30min)** — catalog — advisory-only catalog: models_cache.json primary (fail-soft), webpage pricing on --refresh, XDG cache outside worktrees, import-isolation test
+  - Surfaced by: CEO F3/F4, Eng F6, DX F7/F8
+  - Files: scripts/codex_model_catalog.py, tests
+  - Verify: offline/stale/corrupt nil-matrix all degrade display only
+- [x] **T8 (P2, human: ~4h / CC: ~30min)** — docs — SKILL.md "Choose and configure the Codex model" + list-models --json + validate-config resolved-profile echo
+  - Surfaced by: DX both
+  - Files: SKILL.md, scripts/codex_model_config.py
+  - Verify: agent flow works reading SKILL.md only
+- [x] **T9 (P2, human: ~2d / CC: ~1.5h)** — tests — full matrix (26 new + 3 updated) per test-plan artifact
+  - Surfaced by: Eng test diagram
+  - Files: scripts/test_codex_model_config.py, test_run_codex_review.py
+  - Verify: python3 -m pytest scripts/ green
+
+**Status: IMPLEMENTED (2026-08-18) — approved with reframe (gate D5), built TDD on worktree-phase7-model-config; 217 tests green.** User adopted the thin
+native execution-profile reframe and all auto-decisions. The Phase 7 section
+above reflects the approved design. Implementation may proceed through tasks
+T1-T9; the four P1 tasks (canonical profile, legacy migration, error spec,
+non-interactive bootstrap) block ship.
+
 ## GSTACK REVIEW REPORT
 
-| Phase | Runs | Status | Findings | Critical gaps |
-|---|---|---|---|---|
-| CEO (plan-ceo-review) | Codex + Claude subagent | issues_open | 7 | 1 (feasibility: background wake-up absent) |
-| Design (plan-design-review) | — | skipped | — | — (no UI scope) |
-| Eng (plan-eng-review) | Codex + Claude subagent | issues_open | 8 | 1 (unsatisfiable DoD L1159) + F1 turn-limit untested |
-| DX (plan-devex-review) | Claude subagent (Codex deferred) | issues_open | 7 | 1 (broken magical moment) |
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 2 (codex+subagent) | CLEAR (via /autoplan) | 6/6 consensus; over-build vs native surfaces; reframe recommended and adopted |
+| Codex Review | `/codex review` | Independent 2nd opinion | 3 voices (ceo/eng/dx) | CLEAR (via /autoplan) | 40 total findings; 3-phase convergence on reframe |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 (codex+subagent) | CLEAR (via /autoplan) | 24 findings; 3 critical contract gaps (replay :809/:1272, migration :1049, probe :985) — all addressed in reframed spec + tasks |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | SKIPPED | no UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 2 (codex+subagent) | CLEAR (via /autoplan) | score 3.9/10 → 7.5 projected; TTHW agent: blocked → <1 min; 6/6 consensus |
 
-**VERDICT:** Phase 4 is **NOT approvable as written.** The headline acceptance
-criterion (automatic background continuation) is a missing host capability —
-confirmed by Codex itself, the Claude subagent, and the plugin's own README.
-Cross-model consensus (CEO 6/6, Eng 6/6) converges on **REFRAME-TO-FOREGROUND**.
-Under the foreground reframe the architecture is sound (Codex), buildable, and
-the skill ships at ~4/10 DX unless the honest-framing + error-UX fixes are applied.
+- **CODEX:** 3 phases as outside voice (14 eng + 12 DX + 14 CEO findings); verdict each: reject-as-written / recast thin — adopted by user at gate D5.
+- **CROSS-MODEL:** absorbed — 18/18 consensus dimensions CONFIRMED across CEO/Eng/DX; zero surviving disagreements; one USER CHALLENGE resolved by user decision (reframe adopted).
+- **VERDICT:** CEO + ENG + DX REVIEWED AND APPROVED WITH REFRAME — Phase 7 rewritten to the thin native execution-profile design; implement via tasks T1-T9 (T1/T2/T3a/T3b are ship-blocking P1s); run /ship when ready.
 
-**CODEX:** REFRAME-TO-FOREGROUND (CEO), ARCHITECTURE-SOUND-FOREGROUND-remove-bg-bar (Eng).
-**CROSS-MODEL:** absorbed — all eng/CEO dimensions CONFIRMED by both voices; no disagreements survived.
-
-**UNRESOLVED DECISIONS:**
-- D1: keep background requirement (→ Phase 4 blocks at acceptance) / reframe to foreground / kill and fold into Phase 5 — **user's call (feasibility blocker).**
-- D2: is there a concrete "drive from inside Codex" use case that justifies Phase 4 over Phase 5? — **user's call.**
+NO UNRESOLVED DECISIONS

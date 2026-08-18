@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_codex_review as rcr  # noqa: E402
+import codex_model_config as cmc  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,88 @@ def test_build_command_model_optional():
     with_model = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o", model="gpt-5")
     assert "-m" not in without
     assert with_model[with_model.index("-m") + 1] == "gpt-5"
+
+
+def test_build_command_reasoning_effort_becomes_native_override():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o", model="gpt-5.6-luna",
+        reasoning_effort="high",
+    )
+    i = cmd.index("-c")
+    assert cmd[i + 1] == 'model_reasoning_effort="high"'  # TOML-value form
+    assert "-m" in cmd
+
+
+def test_build_command_reasoning_effort_omitted_when_none():
+    cmd = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o")
+    assert "-c" not in cmd
+
+
+def test_build_command_codex_profile_flag():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o", codex_profile="review",
+    )
+    assert cmd[cmd.index("-p") + 1] == "review"
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — profile in review receipts, doctor receipts, and the probe
+# ---------------------------------------------------------------------------
+
+def test_run_review_receipt_binds_profile(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    res, fake = _profiled_run(tmp_path, ledger, _profile())
+    assert res.outcome == "completed"
+    receipt = json.loads(next(Path(tmp_path / "out").glob("receipt-*.json")).read_text())
+    assert receipt["profile"]["profile_digest"] == _profile().digest
+    assert receipt["profile"]["resolution_source"] == "project_config"
+    assert receipt["profile"]["model"] == "gpt-5.6-luna"
+    assert receipt["profile"]["reasoning_effort"] == "medium"
+    # the executed vector carries the native effort override
+    exec_calls = [c for c in fake.calls if "exec" in c and "--output-schema" in c]
+    assert exec_calls and 'model_reasoning_effort="medium"' in exec_calls[0]
+
+
+def test_run_doctor_receipt_records_profile(tmp_path):
+    schema = tmp_path / "schema.json"; schema.write_text("{}", encoding="utf-8")
+    receipt_path = tmp_path / "doctor.json"
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    doctor_verdict = base_verdict(str(wt))
+    doctor_verdict["target"]["target_ref"] = "d" * 64  # doctor's synthetic ref
+    fake = FakeRunner(worktree=str(wt), verdict=doctor_verdict)
+    passed, receipt = rcr.run_doctor(
+        worktree=str(wt), schema_path=str(schema), receipt_path=str(receipt_path),
+        profile=_profile(), runner=fake,
+    )
+    assert passed
+    assert receipt["profile_digest"] == _profile().digest
+    assert receipt["config_version"] == 1
+    assert receipt["resolution_source"] == "project_config"
+    # the doctor executes the same effort override as a review would
+    exec_calls = [c for c in fake.calls if "exec" in c and "--output-schema" in c]
+    assert exec_calls and 'model_reasoning_effort="medium"' in exec_calls[0]
+
+
+def test_preflight_probe_vector_parity_with_exec_vector():
+    # The zero-cost probe must exercise the SAME option surface as the real
+    # exec when a profile is active — otherwise it certifies a different
+    # command than the one that runs.
+    profile = _profile(model="gpt-5.6-luna")
+    seen = []
+
+    def runner(cmd, **kwargs):
+        seen.append(list(cmd))
+        if "--version" in cmd:
+            return FakeCP(stdout="codex-cli 0.146.0\n")
+        return FakeCP(stderr="invalid value '__not_a_sandbox__' for '--sandbox'\n", returncode=2)
+
+    ok, failures = rcr.preflight(
+        worktree=None, schema_path=None, runner=runner, profile=profile,
+    )
+    assert ok, failures
+    probe = next(c for c in seen if "exec" in c and "__transport_probe__" in c)
+    assert "-m" in probe and probe[probe.index("-m") + 1] == "gpt-5.6-luna"
+    assert 'model_reasoning_effort="medium"' in probe
 
 
 def test_build_command_uses_resolved_codex_path():
@@ -559,6 +642,151 @@ def test_run_review_rejects_conflicting_completed_round(tmp_path):
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 — profile-bound ledger rounds
+# ---------------------------------------------------------------------------
+
+def _profiled_run(tmp_path, ledger, profile, verdict=None, wt=None):
+    wt = wt or (tmp_path / "wt")
+    wt.mkdir(exist_ok=True)
+    (wt / ".git").mkdir(exist_ok=True)
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    fake = FakeRunner(worktree=str(wt), verdict=verdict or base_verdict(str(wt)))
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(tmp_path / "packet.md"), schema_path=str(tmp_path / "schema.json"),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), profile=profile, runner=fake,
+    )
+    return res, fake
+
+
+def test_run_review_binds_profile_digest_in_ledger(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    res, _ = _profiled_run(tmp_path, ledger, _profile())
+    assert res.outcome == "completed"
+    data = json.loads(ledger.read_text())
+    assert data["m1:r1"]["profile_digest"] == _profile().digest
+
+
+def test_run_review_replays_completed_round_only_for_same_profile(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    _profiled_run(tmp_path, ledger, _profile())
+    # Same profile: the stored verdict replays without a new codex call.
+    res, fake = _profiled_run(tmp_path, ledger, _profile(), verdict="missing")
+    assert res.outcome == "completed"
+    assert res.verdict and res.verdict["verdict"] == "approve"
+    assert not any("exec" in c and "--output-schema" in c for c in fake.calls)
+
+
+def test_run_review_profile_change_advances_round_instead_of_crashing(tmp_path):
+    import pytest
+    ledger = tmp_path / "ledger.json"
+    _profiled_run(tmp_path, ledger, _profile())
+    # Policy change mid-milestone: same round, different profile → the old
+    # verdict must NOT replay and the wrapper must NOT die with RuntimeError.
+    other = _profile(reasoning_effort="high")
+    res, fake = _profiled_run(tmp_path, ledger, other, verdict="missing")
+    assert res.outcome == "profile_changed"
+    assert "--round" in (res.diagnostics or "")
+    # no review was executed under the mismatched profile
+    assert not any("exec" in c and "--output-schema" in c for c in fake.calls)
+
+
+def test_run_review_legacy_ledger_round_requires_new_round(tmp_path):
+    import pytest
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").mkdir()
+    ledger = tmp_path / "ledger.json"
+    # A faithful pre-Phase-7 completed entry: full old signature, no
+    # profile_digest key. The single-missing-field case must stay the GENERIC
+    # conflict (naming profile_digest), not be misread as a policy change —
+    # the round completed under an unrecorded, not different, profile.
+    ledger.write_text(json.dumps({"m1:r1": {
+        "milestone": "m1", "round": 1,
+        "transport_version": rcr.TRANSPORT_VERSION,
+        "schema_version": rcr.SCHEMA_VERSION,
+        "review_kind": "milestone",
+        "worktree": str(wt), "scope": "uncommitted",
+        "baseline": "deadbeefcafebabe000000000000000000000000",
+        "dirty_digest_pre": "d" * 64, "target_fingerprint_pre": "f" * 64,
+        "packet_digest": "a" * 64,
+        "status": "completed",
+        "receipt": "/nonexistent.json",
+    }}))
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    fake = FakeRunner(worktree=str(wt), verdict="missing")
+    with pytest.raises(RuntimeError, match="conflicts.*profile_digest"):
+        rcr.run_review(
+            review_kind="milestone", worktree=str(wt), scope="uncommitted",
+            packet_path=str(tmp_path / "packet.md"),
+            schema_path=str(tmp_path / "schema.json"),
+            output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+            state_ledger=str(ledger), runner=fake,
+        )
+
+
+def test_claim_round_drift_plus_profile_change_stays_a_conflict(tmp_path):
+    import pytest
+    led = str(tmp_path / "ledger.json")
+    now = lambda: "2026-08-18T00:00:00Z"  # noqa: E731
+    sig = {"milestone": "m1", "round": 1, "packet_digest": "aaa",
+           "profile_digest": "p1", "status": "completed"}
+    rcr.claim_round(led, "m1:r1", sig, now=now)
+    # Target drift mixed with a policy change must NOT be laundered into the
+    # advance-round advice: it stays a generic conflict naming the drift.
+    drifted = {"milestone": "m1", "round": 1, "packet_digest": "CHANGED",
+               "profile_digest": "p2", "status": "completed"}
+    with pytest.raises(RuntimeError, match="packet_digest"):
+        rcr.claim_round(led, "m1:r1", drifted, now=now, profile_key="profile_digest")
+
+
+def test_claim_round_legacy_missing_digest_is_generic_conflict(tmp_path):
+    import pytest
+    led = str(tmp_path / "ledger.json")
+    now = lambda: "2026-08-18T00:00:00Z"  # noqa: E731
+    # Legacy completed entry: every field matches EXCEPT it has no
+    # profile_digest key at all. This exact shape must take the generic
+    # conflict path (naming profile_digest), NOT ProfileChangedError — the
+    # round completed under an unrecorded profile, not a different one.
+    Path(led).write_text(json.dumps({"m1:r1": {
+        "milestone": "m1", "round": 1, "packet_digest": "aaa",
+        "status": "completed", "receipt": "/nonexistent.json",
+    }}))
+    with pytest.raises(RuntimeError, match="conflicts.*profile_digest"):
+        rcr.claim_round(led, "m1:r1",
+                        {"milestone": "m1", "round": 1, "packet_digest": "aaa",
+                         "profile_digest": "p1", "status": "completed"},
+                        now=now, profile_key="profile_digest")
+
+
+def test_claim_round_running_round_profile_mismatch_keeps_exclusion(tmp_path):
+    import pytest
+    led = str(tmp_path / "ledger.json")
+    now = lambda: "2026-08-18T00:00:00Z"  # noqa: E731
+    # A RUNNING entry with a live PID: a profile-only mismatch must NOT
+    # return profile_changed (which would invite an overlapping reviewer);
+    # mutual exclusion wins.
+    entry = {"milestone": "m1", "round": 1, "profile_digest": "p1",
+             "status": "running", "pid": os.getpid(), "started_at": now()}
+    Path(led).write_text(json.dumps({"m1:r1": entry}))
+    with pytest.raises(RuntimeError, match="conflicts"):
+        rcr.claim_round(led, "m1:r1",
+                        {"milestone": "m1", "round": 1, "profile_digest": "p2"},
+                        now=now, profile_key="profile_digest")
+        rcr.run_review(
+            review_kind="milestone", worktree=str(wt), scope="uncommitted",
+            packet_path=str(tmp_path / "packet.md"),
+            schema_path=str(tmp_path / "schema.json"),
+            output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+            state_ledger=str(ledger),
+            runner=FakeRunner(worktree=str(wt), verdict="missing"),
+        )
+
+
 def test_run_review_scope_base_uses_baseline(tmp_path):
     wt = tmp_path / "wt"
     v = base_verdict(str(wt), scope="base", baseline="main")
@@ -611,6 +839,112 @@ def test_doctor_receipt_model_binding(tmp_path):
     fake = FakeRunner(worktree=str(tmp_path))
     assert rcr.verify_doctor_receipt(str(receipt), model="gpt-5.4", runner=fake) == []
     assert any("model" in e for e in rcr.verify_doctor_receipt(str(receipt), model="gpt-5.3", runner=fake))
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — execution-profile binding in doctor receipts
+# ---------------------------------------------------------------------------
+
+def _profile(**over):
+    base = dict(
+        model="gpt-5.6-luna", reasoning_effort="medium", codex_profile=None,
+        config_version=1, resolution_source="project_config",
+    )
+    base.update(over)
+    return cmc.ExecutionProfile(**base)
+
+
+def test_doctor_key_binds_profile_fields():
+    key = rcr.doctor_key("codex-cli 0.146.0", profile=_profile())
+    assert key["model"] == "gpt-5.6-luna"
+    assert key["reasoning_effort"] == "medium"
+    assert key["config_version"] == 1
+    assert key["profile_digest"] == _profile().digest
+    # resolution_source is provenance: recorded in receipts, never compared
+    assert "resolution_source" not in key
+
+
+def test_verify_doctor_receipt_accepts_matching_profile(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=_profile()),
+        "resolution_source": "project_config",
+        "outcome": "passed",
+    }))
+    fake = FakeRunner(worktree=str(tmp_path))
+    assert rcr.verify_doctor_receipt(
+        str(receipt), profile=_profile(), runner=fake
+    ) == []
+
+
+def test_verify_doctor_receipt_rejects_cross_profile(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=_profile()),
+        "outcome": "passed",
+    }))
+    fake = FakeRunner(worktree=str(tmp_path))
+    other = _profile(reasoning_effort="high")
+    errors = rcr.verify_doctor_receipt(str(receipt), profile=other, runner=fake)
+    assert any("profile_digest" in e for e in errors)
+    assert any("doctor" in e.lower() for e in errors)  # actionable remediation
+
+
+def test_verify_doctor_receipt_rejects_user_pin_drift(tmp_path):
+    # Doctor certified while the user config pinned model A; the user later
+    # pins model B. The receipt must NOT authorize the B review.
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "config.toml").write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+    prof_a = cmc.resolve_profile(worktree=str(tmp_path), codex_home=str(home))
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=prof_a),
+        "outcome": "passed",
+    }))
+    (home / "config.toml").write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+    prof_b = cmc.resolve_profile(worktree=str(tmp_path), codex_home=str(home))
+    errors = rcr.verify_doctor_receipt(
+        str(receipt), profile=prof_b,
+        runner=FakeRunner(worktree=str(tmp_path)),
+    )
+    assert any("native_model_pin" in e for e in errors)
+    assert any("profile_digest" in e for e in errors)
+
+
+def test_main_doctor_rejects_bad_codex_profile_stably(monkeypatch, tmp_path, capsys):
+    # Invalid --codex-profile must surface as a stable config error from the
+    # resolution seam — never a traceback from the exec-vector builder.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    code = rcr.main([
+        "doctor", "--worktree", str(tmp_path), "--schema", "s.json",
+        "--receipt", str(tmp_path / "d.json"),
+        "--model", "gpt-5.6-luna", "--codex-profile", "bad profile",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "codex_profile" in captured.out + captured.err
+
+
+def test_verify_doctor_receipt_legacy_receipt_names_remediation(tmp_path):
+    # A pre-Phase-7 receipt lacks the profile keys entirely: it must fail as
+    # doctor_required with the re-doctor fix, never silently pass.
+    legacy = {
+        "transport_version": rcr.TRANSPORT_VERSION,
+        "schema_version": rcr.SCHEMA_VERSION,
+        "codex_version": "codex-cli 0.146.0",
+        "platform": sys.platform,
+        "machine": "arm64",
+        "model": "<cli-default>",
+        "outcome": "passed",
+    }
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps(legacy))
+    fake = FakeRunner(worktree=str(tmp_path))
+    errors = rcr.verify_doctor_receipt(
+        str(receipt), profile=_profile(model=None, config_version="none"), runner=fake,
+    )
+    assert any("profile_digest" in e for e in errors)
+    assert any("re-run doctor" in e for e in errors)
 
 
 def test_plan_fingerprint_tracks_referenced_file_contents(tmp_path):
@@ -926,6 +1260,386 @@ def test_doctor_instruments_doctor_phase(tmp_path):
     # the doctor result itself is unaffected by observation
     assert isinstance(passed, bool)
     assert doctor_receipt["outcome"] in ("passed", "failed")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — CLI subcommands (init-config / validate-config / list-models)
+# ---------------------------------------------------------------------------
+
+def test_init_config_non_interactive_writes_config(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main([
+        "init-config", "--worktree", str(wt),
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "medium",
+    ])
+    assert code == 0
+    text = (wt / ".codex-review.toml").read_text(encoding="utf-8")
+    assert 'model = "gpt-5.6-luna"' in text
+    assert 'reasoning_effort = "medium"' in text
+
+
+def test_init_config_defaults_worktree_to_cwd(tmp_path, monkeypatch):
+    wt = tmp_path / "wt"; wt.mkdir()
+    monkeypatch.chdir(wt)
+    code = rcr.main(["init-config", "--model", "gpt-5.6-luna"])
+    assert code == 0
+    assert (wt / ".codex-review.toml").exists()
+
+
+def test_init_config_without_model_fails_fast_non_interactive(tmp_path, capsys):
+    # pytest runs without a TTY: this is exactly the Claude-agent condition.
+    # The command must fail fast with the actionable template — never hang on
+    # a prompt the caller cannot answer.
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main(["init-config", "--worktree", str(wt)])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MISSING" in out.out + out.err
+    assert not (wt / ".codex-review.toml").exists()
+
+
+def test_init_config_idempotent_then_conflict_then_force(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    argv = ["init-config", "--worktree", str(wt), "--model", "gpt-5.6-luna"]
+    assert rcr.main(argv) == 0
+    capsys.readouterr()  # drain success output
+    assert rcr.main(argv) == 0  # SAME policy: documented idempotent no-op
+    conflicting = ["init-config", "--worktree", str(wt), "--model", "gpt-5.6-terra"]
+    assert rcr.main(conflicting) == rcr.EX_CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "--force" in captured.out + captured.err
+    assert rcr.main([*conflicting, "--force"]) == 0
+    assert 'model = "gpt-5.6-terra"' in (wt / ".codex-review.toml").read_text()
+
+
+def test_validate_config_prints_resolved_profile_and_level(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6-luna"\nreasoning_effort = "medium"\n',
+        encoding="utf-8",
+    )
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profile"]["model"] == "gpt-5.6-luna"
+    assert payload["profile"]["resolution_source"] == "project_config"
+    assert payload["profile"]["profile_digest"]
+    # the file is never rewritten by validation
+    assert 'model = "gpt-5.6-luna"' in (wt / ".codex-review.toml").read_text()
+
+
+def test_validate_config_missing_config_resolves_native_default(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))  # hermetic
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == 0  # zero-config is a valid, recorded resolution
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profile"]["resolution_source"] == "cli_default"
+    assert any("no project config" in w for w in payload["warnings"])
+
+
+def test_validate_config_malformed_is_loud(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text("version = oops\n", encoding="utf-8")
+    code = rcr.main(["validate-config", "--worktree", str(wt)])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MALFORMED" in out.out + out.err
+
+
+def test_list_models_json_never_raises(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))  # no native cache
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))  # no real cache
+    code = rcr.main(["list-models", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] in ("native", "cached", "none")
+    assert isinstance(payload["models"], list)
+
+
+def test_review_flags_resolve_profile(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    (tmp_path / "packet.md").write_text("# p\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_run_review(**kwargs):
+        captured.update(kwargs)
+        return rcr.ReviewResult(outcome="completed", verdict={"verdict": "approve"})
+
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", fake_run_review)
+
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", str(tmp_path / "packet.md"),
+        "--schema", str(tmp_path / "schema.json"),
+        "--output-dir", str(tmp_path / "out"),
+        "--doctor-receipt", "/dev/null",
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "high",
+    ])
+    assert code == 0
+    prof = captured["profile"]
+    assert prof.model == "gpt-5.6-luna"
+    assert prof.reasoning_effort == "high"
+    assert prof.resolution_source == "cli_flag"
+
+
+def test_review_require_config_without_config_fails(tmp_path, capsys, monkeypatch):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+        "--require-config",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG_MISSING" in out.out + out.err
+
+
+def test_review_without_config_records_native_default(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    captured = {}
+
+    def fake_run_review(**kwargs):
+        captured.update(kwargs)
+        return rcr.ReviewResult(outcome="completed", verdict={"verdict": "approve"})
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", fake_run_review)
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(wt), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+    ])
+    assert code == 0
+    assert captured["profile"].resolution_source == "cli_default"
+    assert captured["model"] is None  # no -m passed: today's behavior preserved
+
+
+def test_run_review_records_profile_in_observation(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    obs = FakeQuotaObserver(before_snap=_ok_snapshot(10), after_snap=_ok_snapshot(12))
+    wt = tmp_path / "wt"
+    wt.mkdir(exist_ok=True)
+    (wt / ".git").mkdir(exist_ok=True)
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)))
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(tmp_path / "packet.md"), schema_path=str(tmp_path / "schema.json"),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), profile=_profile(), runner=fake,
+        quota_observer=obs,
+    )
+    assert res.outcome == "completed"
+    assert len(obs.records) == 1
+    meta = obs.records[0][0]
+    assert meta["profile_digest"] == _profile().digest
+    assert meta["reasoning_effort"] == "medium"
+    assert meta["codex_profile"] is None
+    assert meta["config_version"] == 1
+    assert meta["resolution_source"] == "project_config"
+
+
+def test_validate_config_warns_on_unknown_model_slug(tmp_path, capsys, monkeypatch):
+    # Advisory: if the CLI's own model cache is readable and the pinned slug
+    # is unknown, surface the alias/retired hint. Catalog unavailable → no
+    # warning (advisory checks never depend on catalog presence).
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({
+        "models": [{"slug": "gpt-5.6-sol",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    warnings = " ".join(payload["warnings"])
+    assert "gpt-5.6" in warnings
+    assert "list-models" in warnings
+
+
+def test_validate_config_warns_on_unsupported_effort(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "codexhome"; home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({
+        "models": [{"slug": "gpt-5.6-sol",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]}],
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "gpt-5.6-sol"\nreasoning_effort = "max"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    warnings = " ".join(payload["warnings"])
+    assert "reasoning_effort" in warnings
+    assert "max" in warnings
+
+
+def test_validate_config_no_warning_without_catalog(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty"))  # no cache
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".codex-review.toml").write_text(
+        'version = 1\nmodel = "anything"\n', encoding="utf-8"
+    )
+    assert rcr.main(["validate-config", "--worktree", str(wt)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["warnings"] == []
+
+
+def test_init_config_prints_next_command(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main([
+        "init-config", "--worktree", str(wt),
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "medium",
+    ])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "doctor" in out  # the paid certification step is named, not auto-run
+
+
+def test_main_doctor_accepts_all_profile_flags(monkeypatch, tmp_path, capsys):
+    # Regression guard for the argparse/handler drift class: the doctor
+    # handler reads args.codex_profile, which once shipped without the
+    # subparser flag — crashing every doctor invocation while the suite
+    # stayed green. This test drives the REAL main() doctor path.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    captured = {}
+
+    def fake_run_doctor(**kw):
+        captured.update(kw)
+        return True, {"outcome": "passed"}
+
+    monkeypatch.setattr(rcr, "run_doctor", fake_run_doctor)
+    monkeypatch.setattr(rcr, "_build_observer", lambda args: None)
+    code = rcr.main([
+        "doctor", "--worktree", str(tmp_path), "--schema", "schemas/codex-review-output.schema.json",
+        "--receipt", str(tmp_path / "doctor.json"),
+        "--model", "gpt-5.6-luna", "--reasoning-effort", "high",
+        "--codex-profile", "review",
+    ])
+    assert code == 0
+    prof = captured["profile"]
+    assert prof.model == "gpt-5.6-luna"
+    assert prof.reasoning_effort == "high"
+    assert prof.codex_profile == "review"
+
+
+def test_main_preflight_probes_resolved_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    captured = {}
+
+    def fake_preflight(**kw):
+        captured.update(kw)
+        return True, []
+
+    monkeypatch.setattr(rcr, "preflight", fake_preflight)
+    code = rcr.main([
+        "preflight", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium",
+    ])
+    assert code == 0
+    prof = captured["profile"]
+    assert prof.model == "gpt-5.6-luna"
+    assert prof.reasoning_effort == "medium"
+    assert prof.resolution_source == "cli_flag"
+
+
+def test_init_config_rejects_invalid_model_before_writing(tmp_path, capsys):
+    wt = tmp_path / "wt"; wt.mkdir()
+    code = rcr.main([
+        "init-config", "--worktree", str(wt), "--model", "x; touch pwned",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "touch pwned" not in out.out  # never echoed back
+    assert not (wt / ".codex-review.toml").exists()
+
+
+def test_init_config_nonexistent_worktree_is_config_error(tmp_path, capsys):
+    code = rcr.main([
+        "init-config", "--worktree", str(tmp_path / "does-not-exist"),
+        "--model", "gpt-5.6-luna",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    out = capsys.readouterr()
+    assert "E_CONFIG" in out.out + out.err  # stable code, never a traceback
+
+
+def test_review_main_emits_profile_changed_exit_code(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", lambda **kw: rcr.ReviewResult(
+        outcome="profile_changed",
+        diagnostics="round m1:r1 completed under a different execution profile",
+    ))
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(tmp_path), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+    ])
+    assert code == rcr.EX_PROFILE_CHANGED
+
+
+def test_review_warns_on_native_default_resolution(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    monkeypatch.setattr(rcr, "run_review", lambda **kw: rcr.ReviewResult(
+        outcome="completed", verdict={"verdict": "approve"},
+    ))
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(tmp_path), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+    ])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "warning" in err and "cli_default" in err
+
+
+def test_review_require_config_not_satisfied_by_effort_flag(monkeypatch, tmp_path, capsys):
+    # --require-config gates the MODEL dimension: an effort-only flag must
+    # not satisfy it while the model silently rides the native default.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(rcr, "validate_inputs", lambda **kw: [])
+    monkeypatch.setattr(rcr, "verify_doctor_receipt", lambda *a, **kw: [])
+    code = rcr.main([
+        "review", "--review-kind", "milestone", "--review-phase", "milestone",
+        "--worktree", str(tmp_path), "--scope", "uncommitted", "--milestone", "m1",
+        "--round", "1", "--packet", "p", "--schema", "s",
+        "--output-dir", str(tmp_path / "out"), "--doctor-receipt", "/dev/null",
+        "--require-config", "--reasoning-effort", "high",
+    ])
+    assert code == rcr.EX_CONFIG_ERROR
+    captured = capsys.readouterr()
+    assert "E_CONFIG_MISSING" in captured.out + captured.err
+
+
+def test_exec_option_flags_rejects_breakout_values():
+    import pytest
+    with pytest.raises(cmc.ConfigError):
+        rcr._exec_option_flags(reasoning_effort='high" sandbox_mode="danger-full-access')
+    with pytest.raises(cmc.ConfigError):
+        rcr._exec_option_flags(model="gpt-5\n")
 
 
 if __name__ == "__main__":
