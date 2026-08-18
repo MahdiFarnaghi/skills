@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_codex_review as rcr  # noqa: E402
+import codex_model_config as cmc  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,88 @@ def test_build_command_model_optional():
     with_model = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o", model="gpt-5")
     assert "-m" not in without
     assert with_model[with_model.index("-m") + 1] == "gpt-5"
+
+
+def test_build_command_reasoning_effort_becomes_native_override():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o", model="gpt-5.6-luna",
+        reasoning_effort="high",
+    )
+    i = cmd.index("-c")
+    assert cmd[i + 1] == 'model_reasoning_effort="high"'  # TOML-value form
+    assert "-m" in cmd
+
+
+def test_build_command_reasoning_effort_omitted_when_none():
+    cmd = rcr.build_command(worktree="/w", schema_path="/s", out_path="/o")
+    assert "-c" not in cmd
+
+
+def test_build_command_codex_profile_flag():
+    cmd = rcr.build_command(
+        worktree="/w", schema_path="/s", out_path="/o", codex_profile="review",
+    )
+    assert cmd[cmd.index("-p") + 1] == "review"
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — profile in review receipts, doctor receipts, and the probe
+# ---------------------------------------------------------------------------
+
+def test_run_review_receipt_binds_profile(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    res, fake = _profiled_run(tmp_path, ledger, _profile())
+    assert res.outcome == "completed"
+    receipt = json.loads(next(Path(tmp_path / "out").glob("receipt-*.json")).read_text())
+    assert receipt["profile"]["profile_digest"] == _profile().digest
+    assert receipt["profile"]["resolution_source"] == "project_config"
+    assert receipt["profile"]["model"] == "gpt-5.6-luna"
+    assert receipt["profile"]["reasoning_effort"] == "medium"
+    # the executed vector carries the native effort override
+    exec_calls = [c for c in fake.calls if "exec" in c and "--output-schema" in c]
+    assert exec_calls and 'model_reasoning_effort="medium"' in exec_calls[0]
+
+
+def test_run_doctor_receipt_records_profile(tmp_path):
+    schema = tmp_path / "schema.json"; schema.write_text("{}", encoding="utf-8")
+    receipt_path = tmp_path / "doctor.json"
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    doctor_verdict = base_verdict(str(wt))
+    doctor_verdict["target"]["target_ref"] = "d" * 64  # doctor's synthetic ref
+    fake = FakeRunner(worktree=str(wt), verdict=doctor_verdict)
+    passed, receipt = rcr.run_doctor(
+        worktree=str(wt), schema_path=str(schema), receipt_path=str(receipt_path),
+        profile=_profile(), runner=fake,
+    )
+    assert passed
+    assert receipt["profile_digest"] == _profile().digest
+    assert receipt["config_version"] == 1
+    assert receipt["resolution_source"] == "project_config"
+    # the doctor executes the same effort override as a review would
+    exec_calls = [c for c in fake.calls if "exec" in c and "--output-schema" in c]
+    assert exec_calls and 'model_reasoning_effort="medium"' in exec_calls[0]
+
+
+def test_preflight_probe_vector_parity_with_exec_vector():
+    # The zero-cost probe must exercise the SAME option surface as the real
+    # exec when a profile is active — otherwise it certifies a different
+    # command than the one that runs.
+    profile = _profile(model="gpt-5.6-luna")
+    seen = []
+
+    def runner(cmd, **kwargs):
+        seen.append(list(cmd))
+        if "--version" in cmd:
+            return FakeCP(stdout="codex-cli 0.146.0\n")
+        return FakeCP(stderr="invalid value '__not_a_sandbox__' for '--sandbox'\n", returncode=2)
+
+    ok, failures = rcr.preflight(
+        worktree=None, schema_path=None, runner=runner, profile=profile,
+    )
+    assert ok, failures
+    probe = next(c for c in seen if "exec" in c and "__transport_probe__" in c)
+    assert "-m" in probe and probe[probe.index("-m") + 1] == "gpt-5.6-luna"
+    assert 'model_reasoning_effort="medium"' in probe
 
 
 def test_build_command_uses_resolved_codex_path():
@@ -559,6 +642,82 @@ def test_run_review_rejects_conflicting_completed_round(tmp_path):
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 7 — profile-bound ledger rounds
+# ---------------------------------------------------------------------------
+
+def _profiled_run(tmp_path, ledger, profile, verdict=None, wt=None):
+    wt = wt or (tmp_path / "wt")
+    wt.mkdir(exist_ok=True)
+    (wt / ".git").mkdir(exist_ok=True)
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    fake = FakeRunner(worktree=str(wt), verdict=verdict or base_verdict(str(wt)))
+    res = rcr.run_review(
+        review_kind="milestone", worktree=str(wt), scope="uncommitted",
+        packet_path=str(tmp_path / "packet.md"), schema_path=str(tmp_path / "schema.json"),
+        output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+        state_ledger=str(ledger), profile=profile, runner=fake,
+    )
+    return res, fake
+
+
+def test_run_review_binds_profile_digest_in_ledger(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    res, _ = _profiled_run(tmp_path, ledger, _profile())
+    assert res.outcome == "completed"
+    data = json.loads(ledger.read_text())
+    assert data["m1:r1"]["profile_digest"] == _profile().digest
+
+
+def test_run_review_replays_completed_round_only_for_same_profile(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    _profiled_run(tmp_path, ledger, _profile())
+    # Same profile: the stored verdict replays without a new codex call.
+    res, fake = _profiled_run(tmp_path, ledger, _profile(), verdict="missing")
+    assert res.outcome == "completed"
+    assert res.verdict and res.verdict["verdict"] == "approve"
+    assert not any("exec" in c and "--output-schema" in c for c in fake.calls)
+
+
+def test_run_review_profile_change_advances_round_instead_of_crashing(tmp_path):
+    import pytest
+    ledger = tmp_path / "ledger.json"
+    _profiled_run(tmp_path, ledger, _profile())
+    # Policy change mid-milestone: same round, different profile → the old
+    # verdict must NOT replay and the wrapper must NOT die with RuntimeError.
+    other = _profile(reasoning_effort="high")
+    res, fake = _profiled_run(tmp_path, ledger, other, verdict="missing")
+    assert res.outcome == "profile_changed"
+    assert "--round" in (res.diagnostics or "")
+    # no review was executed under the mismatched profile
+    assert not any("exec" in c and "--output-schema" in c for c in fake.calls)
+
+
+def test_run_review_legacy_ledger_round_requires_new_round(tmp_path):
+    import pytest
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").mkdir()
+    ledger = tmp_path / "ledger.json"
+    # A pre-Phase-7 completed entry has no profile_digest key.
+    ledger.write_text(json.dumps({"m1:r1": {
+        "milestone": "m1", "round": 1, "status": "completed",
+        "receipt": "/nonexistent.json",
+    }}))
+    (tmp_path / "packet.md").write_text("# packet focus\n", encoding="utf-8")
+    (tmp_path / "schema.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="profile_digest"):
+        rcr.run_review(
+            review_kind="milestone", worktree=str(wt), scope="uncommitted",
+            packet_path=str(tmp_path / "packet.md"),
+            schema_path=str(tmp_path / "schema.json"),
+            output_dir=str(tmp_path / "out"), milestone="m1", round_no=1,
+            state_ledger=str(ledger),
+            runner=FakeRunner(worktree=str(wt), verdict="missing"),
+        )
+
+
 def test_run_review_scope_base_uses_baseline(tmp_path):
     wt = tmp_path / "wt"
     v = base_verdict(str(wt), scope="base", baseline="main")
@@ -611,6 +770,77 @@ def test_doctor_receipt_model_binding(tmp_path):
     fake = FakeRunner(worktree=str(tmp_path))
     assert rcr.verify_doctor_receipt(str(receipt), model="gpt-5.4", runner=fake) == []
     assert any("model" in e for e in rcr.verify_doctor_receipt(str(receipt), model="gpt-5.3", runner=fake))
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — execution-profile binding in doctor receipts
+# ---------------------------------------------------------------------------
+
+def _profile(**over):
+    base = dict(
+        model="gpt-5.6-luna", reasoning_effort="medium", codex_profile=None,
+        config_version=1, resolution_source="project_config",
+    )
+    base.update(over)
+    return cmc.ExecutionProfile(**base)
+
+
+def test_doctor_key_binds_profile_fields():
+    key = rcr.doctor_key("codex-cli 0.146.0", profile=_profile())
+    assert key["model"] == "gpt-5.6-luna"
+    assert key["reasoning_effort"] == "medium"
+    assert key["config_version"] == 1
+    assert key["profile_digest"] == _profile().digest
+    # resolution_source is provenance: recorded in receipts, never compared
+    assert "resolution_source" not in key
+
+
+def test_verify_doctor_receipt_accepts_matching_profile(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=_profile()),
+        "resolution_source": "project_config",
+        "outcome": "passed",
+    }))
+    fake = FakeRunner(worktree=str(tmp_path))
+    assert rcr.verify_doctor_receipt(
+        str(receipt), profile=_profile(), runner=fake
+    ) == []
+
+
+def test_verify_doctor_receipt_rejects_cross_profile(tmp_path):
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps({
+        **rcr.doctor_key("codex-cli 0.146.0", profile=_profile()),
+        "outcome": "passed",
+    }))
+    fake = FakeRunner(worktree=str(tmp_path))
+    other = _profile(reasoning_effort="high")
+    errors = rcr.verify_doctor_receipt(str(receipt), profile=other, runner=fake)
+    assert any("profile_digest" in e for e in errors)
+    assert any("doctor" in e.lower() for e in errors)  # actionable remediation
+
+
+def test_verify_doctor_receipt_legacy_receipt_names_remediation(tmp_path):
+    # A pre-Phase-7 receipt lacks the profile keys entirely: it must fail as
+    # doctor_required with the re-doctor fix, never silently pass.
+    legacy = {
+        "transport_version": rcr.TRANSPORT_VERSION,
+        "schema_version": rcr.SCHEMA_VERSION,
+        "codex_version": "codex-cli 0.146.0",
+        "platform": sys.platform,
+        "machine": "arm64",
+        "model": "<cli-default>",
+        "outcome": "passed",
+    }
+    receipt = tmp_path / "doctor.json"
+    receipt.write_text(json.dumps(legacy))
+    fake = FakeRunner(worktree=str(tmp_path))
+    errors = rcr.verify_doctor_receipt(
+        str(receipt), profile=_profile(model=None, config_version="none"), runner=fake,
+    )
+    assert any("profile_digest" in e for e in errors)
+    assert any("re-run doctor" in e for e in errors)
 
 
 def test_plan_fingerprint_tracks_referenced_file_contents(tmp_path):

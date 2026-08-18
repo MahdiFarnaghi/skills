@@ -53,6 +53,7 @@ from typing import Any, Callable, Sequence
 # beside this script; ensure the script directory is importable in all run modes.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import codex_process  # noqa: E402
+import codex_model_config as cmc  # noqa: E402
 import quota_observation as qo  # noqa: E402
 import read_codex_quota as rcq  # noqa: E402
 import summarize_quota_observations as sq  # noqa: E402
@@ -143,6 +144,8 @@ EX_PREFLIGHT_FAILED = 74
 EX_GIT_IDENTITY_FAILED = 75
 EX_ARTIFACT_ERROR = 76
 EX_DOCTOR_REQUIRED = 77
+EX_PROFILE_CHANGED = 78
+EX_CONFIG_ERROR = 79
 
 # Map outcome name -> (exit code, remediation text). Remediation text is the
 # machine-fixed "problem + cause + fix" the skill surfaces (amendment A6).
@@ -210,6 +213,19 @@ OUTCOMES: dict[str, tuple[int, str]] = {
         EX_DOCTOR_REQUIRED,
         "No matching successful live-doctor receipt exists for this transport. Run doctor explicitly.",
     ),
+    "profile_changed": (
+        EX_PROFILE_CHANGED,
+        "The execution profile (model/effort/config) changed after this round "
+        "completed; the stored verdict is bound to the old profile and must "
+        "not be replayed. Re-run review with the next round number "
+        "(--round N+1).",
+    ),
+    "config_error": (
+        EX_CONFIG_ERROR,
+        "The model-policy configuration is missing or malformed. Run "
+        "`init-config --worktree <path> --model <MODEL>` or fix the config "
+        "file named in the diagnostic.",
+    ),
 }
 
 # Known-bad Codex CLI versions (regex), mirroring the gstack probe. These had
@@ -233,6 +249,28 @@ VALID_SEVERITIES = ("critical", "high", "medium", "low")
 FINDING_ID_RE = re.compile(r"^F-[A-Za-z0-9_-]+$")
 
 
+def _exec_option_flags(
+    model: str | None = None, reasoning_effort: str | None = None,
+    codex_profile: str | None = None,
+) -> list[str]:
+    """Native exec-level option flags for an execution profile.
+
+    Single source for BOTH the real exec vector and the preflight probe, so
+    the probe can never certify a different command surface than the one
+    that runs (Phase 7 probe-parity contract). ``reasoning_effort`` uses the
+    ``-c`` TOML-value form the CLI documents (the ``-c model="..."``
+    precedent in the quota reader).
+    """
+    flags: list[str] = []
+    if model:
+        flags += ["-m", model]
+    if reasoning_effort:
+        flags += ["-c", f'model_reasoning_effort="{reasoning_effort}"']
+    if codex_profile:
+        flags += ["-p", codex_profile]
+    return flags
+
+
 def build_command(
     *,
     worktree: str,
@@ -241,6 +279,8 @@ def build_command(
     model: str | None = None,
     codex_path: str = "codex",
     exec_flags: Sequence[str] = ("--ephemeral", "--ignore-rules"),
+    reasoning_effort: str | None = None,
+    codex_profile: str | None = None,
 ) -> list[str]:
     """Build the plain structured ``codex exec`` argument vector."""
     cmd: list[str] = [
@@ -256,8 +296,7 @@ def build_command(
         "-o",
         out_path,
     ]
-    if model:
-        cmd += ["-m", model]
+    cmd += _exec_option_flags(model, reasoning_effort, codex_profile)
     return cmd
 
 
@@ -806,10 +845,26 @@ def _pid_alive(pid: Any) -> bool:
     return True
 
 
+class ProfileChangedError(RuntimeError):
+    """A completed ledger round was re-entered under a different execution
+    profile. The old verdict is bound to its profile and must not replay;
+    callers surface this as an advance-to-next-round instruction, not a
+    crash (Phase 7 ledger contract)."""
+
+
 def claim_round(
-    path: str, key: str, signature: dict[str, Any], *, now: Callable[[], str]
+    path: str, key: str, signature: dict[str, Any], *, now: Callable[[], str],
+    profile_key: str | None = None,
 ) -> ReviewResult | None:
-    """Atomically claim a round or replay its matching completed receipt."""
+    """Atomically claim a round or replay its matching completed receipt.
+
+    ``profile_key`` names the signature field carrying the execution-profile
+    digest. When it is the ONLY mismatch against an existing entry, the
+    conflict is a policy change, not target drift: raise
+    :class:`ProfileChangedError` so the caller advances to a new round.
+    Any other mismatch (or a pre-Phase-7 entry missing the digest entirely)
+    keeps the generic conflict error naming the mismatching fields.
+    """
     with ledger_lock(path):
         ledger: dict[str, Any] = {}
         if os.path.isfile(path):
@@ -820,6 +875,14 @@ def claim_round(
         if isinstance(existing, dict):
             mismatch = [k for k, v in signature.items() if existing.get(k) != v]
             if mismatch:
+                if profile_key and mismatch == [profile_key]:
+                    raise ProfileChangedError(
+                        f"round {key} completed under a different execution "
+                        "profile; the stored verdict is bound to that profile "
+                        "and must not replay. Re-run with --round "
+                        f"{int(str(key).rsplit('r', 1)[-1]) + 1} under the new "
+                        "profile."
+                    )
                 raise RuntimeError(
                     f"round {key} conflicts with existing state: {', '.join(mismatch)}"
                 )
@@ -949,12 +1012,16 @@ def preflight(
     worktree: str | None = None,
     schema_path: str | None = None,
     runner: Runner | None = None,
+    profile: cmc.ExecutionProfile | None = None,
 ) -> tuple[bool, list[str]]:
     """Verify the transport without spending Codex usage.
 
     Checks: codex present, version supported, auth present, (optional) worktree
     is a git repo, (optional) schema parses, and the critical flag-placement
-    invariant via a zero-cost plain-exec arg-parse probe. Structured-output
+    invariant via a zero-cost plain-exec arg-parse probe. When ``profile`` is
+    given, the probe carries the SAME ``-m``/``-c``/``-p`` option flags the
+    real exec would use (built by the shared ``_exec_option_flags``), so the
+    probe certifies the surface that actually runs. Structured-output
     behavior itself is certified separately by the paid ``doctor`` command.
     """
     runner = runner or subprocess.run
@@ -982,11 +1049,16 @@ def preflight(
     if not key and not (codex_home / "auth.json").is_file():
         failures.append(OUTCOMES["auth_failed"][1])
 
-    # Zero-cost parser probe for the exact plain-exec surface.
+    # Zero-cost parser probe for the exact plain-exec surface — including the
+    # profile's option flags when one is active (probe/vector parity).
+    prof_flags = (
+        _exec_option_flags(profile.model, profile.reasoning_effort, profile.codex_profile)
+        if profile else []
+    )
     probe = runner(
         [codex, "exec", "-s", "__not_a_sandbox__", "--output-schema",
          schema_path or "__schema_probe__.json", "-o", "__out_probe__.json",
-         "__transport_probe__"],
+         *prof_flags, "__transport_probe__"],
         capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     combined = (probe.stdout or "") + (probe.stderr or "")
@@ -1024,29 +1096,79 @@ def _codex_version(codex: str = "codex", *, runner: Runner | None = None) -> str
     return lines[0] if lines else ""
 
 
-def doctor_key(codex_version: str, model: str | None = None) -> dict[str, Any]:
+def _profile_from_model(
+    model: str | None, *, resolution_source: str | None = None,
+) -> cmc.ExecutionProfile:
+    """Backward-compatible shim: synthesize a profile from a bare model flag.
+
+    Pre-Phase-7 call sites passed ``--model`` with no policy context; they get
+    a config-less profile whose digest is bound exactly like any other.
+    """
+    return cmc.ExecutionProfile(
+        model=model, reasoning_effort=None, codex_profile=None,
+        config_version="none",
+        resolution_source=resolution_source or ("cli_flag" if model else "cli_default"),
+    )
+
+
+def doctor_key(
+    codex_version: str, model: str | None = None,
+    *, profile: cmc.ExecutionProfile | None = None,
+) -> dict[str, Any]:
+    """Identity of the transport a doctor receipt certifies.
+
+    Phase 7 binds the full execution profile (model, reasoning effort, native
+    codex profile, config version, profile digest). ``resolution_source`` is
+    provenance: receipts record it, but it is never a compared key — the same
+    execution authorized via flag or config is the same execution. A
+    config-less run carries the explicit ``"none"`` sentinel so an absent
+    field can never be confused with a legacy receipt.
+    """
+    prof = profile or _profile_from_model(model)
     return {
         "transport_version": TRANSPORT_VERSION,
         "schema_version": SCHEMA_VERSION,
         "codex_version": codex_version,
         "platform": sys.platform,
         "machine": platform.machine(),
-        "model": model or "<cli-default>",
+        "model": prof.model or "<cli-default>",
+        "reasoning_effort": prof.reasoning_effort,
+        "codex_profile": prof.codex_profile,
+        "config_version": prof.config_version,
+        "profile_digest": prof.digest,
     }
+
+
+# Receipt keys whose mismatch means "different execution profile" and whose
+# remediation is a single re-doctor, vs. ambient keys (transport/schema
+# version drift) that predate Phase 7.
+_PROFILE_KEY_REMEDIATION = (
+    "profile changed or this is a pre-Phase-7 receipt; re-run doctor with the "
+    "current profile to certify it"
+)
 
 
 def verify_doctor_receipt(
     path: str, *, schema_path: str | None = None, model: str | None = None,
+    profile: cmc.ExecutionProfile | None = None,
     runner: Runner | None = None, codex_path: str = "codex",
 ) -> list[str]:
     try:
         receipt = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [f"doctor receipt is unreadable: {exc}"]
-    expected = doctor_key(_codex_version(codex_path, runner=runner), model)
+    expected = doctor_key(_codex_version(codex_path, runner=runner), model, profile=profile)
     if schema_path:
         expected["schema_digest"] = file_digest(schema_path)
-    errors = [f"doctor receipt mismatch: {key}" for key, value in expected.items() if receipt.get(key) != value]
+    profile_keys = {"model", "reasoning_effort", "codex_profile", "config_version", "profile_digest"}
+    errors: list[str] = []
+    for key, value in expected.items():
+        if receipt.get(key) == value:
+            continue
+        if key in profile_keys:
+            errors.append(f"doctor receipt mismatch: {key} ({_PROFILE_KEY_REMEDIATION})")
+        else:
+            errors.append(f"doctor receipt mismatch: {key}")
     if receipt.get("outcome") != "passed":
         errors.append("doctor receipt does not record outcome=passed")
     return errors
@@ -1057,9 +1179,11 @@ def run_doctor(
     model: str | None = None, runner: Runner | None = None,
     quota_observer: Any = None,
     codex_path: str = "codex",
+    profile: cmc.ExecutionProfile | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Perform the explicit paid structured-output/read-only transport check."""
     runner = runner or subprocess.run
+    prof = profile or _profile_from_model(model)
     worktree = os.path.abspath(worktree)
     identity = git_identity(worktree, runner=runner)
     resolved = {"baseline": identity["head"], "head": identity["head"]}
@@ -1070,8 +1194,9 @@ def run_doctor(
         output_path = os.path.join(temp_dir, "doctor-output.json")
         doctor_ref = "d" * 64
         cmd = build_command(
-            worktree=worktree, schema_path=schema_path, out_path=output_path, model=model,
-            codex_path=codex_path,
+            worktree=worktree, schema_path=schema_path, out_path=output_path,
+            model=prof.model, codex_path=codex_path,
+            reasoning_effort=prof.reasoning_effort, codex_profile=prof.codex_profile,
         )
         prompt = (
             "Transport doctor only. Do not edit files or run commands. Return a schema-valid "
@@ -1101,7 +1226,8 @@ def run_doctor(
     after = target_fingerprint(worktree, post_identity, scope="uncommitted", resolved=resolved, runner=runner)
     passed = process_ok and before == after
     receipt = {
-        **doctor_key(_codex_version(codex_path, runner=runner), model),
+        **doctor_key(_codex_version(codex_path, runner=runner), model, profile=prof),
+        "resolution_source": prof.resolution_source,
         "schema_digest": file_digest(schema_path),
         "outcome": "passed" if passed else "failed",
         "checked_at": utc_now(),
@@ -1228,17 +1354,22 @@ def run_review(
     review_phase: str = "milestone",
     quota_observer: Any = None,
     codex_path: str = "codex",
+    profile: cmc.ExecutionProfile | None = None,
 ) -> ReviewResult:
     """Execute one bounded review and return a classified result + receipt.
 
     Performs real I/O (git, subprocess, file writes). Tests inject ``runner``
-    and a pre-written verdict file to avoid a real Codex call.
+    and a pre-written verdict file to avoid a real Codex call. ``profile``
+    (Phase 7) binds the execution profile into the doctor check, ledger
+    round, receipt, and quota observation; when omitted, a config-less
+    profile is synthesized from ``model`` (pre-Phase-7 behavior).
     """
     runner = runner or subprocess.run
+    prof = profile or _profile_from_model(model)
     if doctor_receipt:
         doctor_errors = verify_doctor_receipt(
-            doctor_receipt, schema_path=schema_path, model=model, runner=runner,
-            codex_path=codex_path,
+            doctor_receipt, schema_path=schema_path, model=model, profile=prof,
+            runner=runner, codex_path=codex_path,
         )
         if doctor_errors:
             return ReviewResult(outcome="doctor_required", diagnostics="; ".join(doctor_errors))
@@ -1271,19 +1402,25 @@ def run_review(
 
     ledger_key = f"{milestone}:r{round_no}"
     if state_ledger:
-        replay = claim_round(state_ledger, ledger_key, {
-            "milestone": milestone,
-            "round": round_no,
-            "transport_version": TRANSPORT_VERSION,
-            "schema_version": SCHEMA_VERSION,
-            "review_kind": review_kind,
-            "worktree": worktree_abs,
-            "scope": effective_scope,
-            "baseline": baseline,
-            "dirty_digest_pre": identity["dirty_digest"],
-            "target_fingerprint_pre": fingerprint_pre,
-            "packet_digest": packet_digest,
-        }, now=now)
+        try:
+            replay = claim_round(state_ledger, ledger_key, {
+                "milestone": milestone,
+                "round": round_no,
+                "transport_version": TRANSPORT_VERSION,
+                "schema_version": SCHEMA_VERSION,
+                "review_kind": review_kind,
+                "worktree": worktree_abs,
+                "scope": effective_scope,
+                "baseline": baseline,
+                "dirty_digest_pre": identity["dirty_digest"],
+                "target_fingerprint_pre": fingerprint_pre,
+                "packet_digest": packet_digest,
+                "profile_digest": prof.digest,
+            }, now=now, profile_key="profile_digest")
+        except ProfileChangedError as exc:
+            # Policy change, not target drift: advance to a new round. The
+            # old completed entry and its profile-bound receipt stay intact.
+            return ReviewResult(outcome="profile_changed", diagnostics=str(exc))
         if replay is not None:
             return replay  # replay short-circuit: no quota reads (Phase 6)
 
@@ -1296,8 +1433,10 @@ def run_review(
         worktree=worktree_abs,
         schema_path=os.path.abspath(schema_path),
         out_path=os.path.abspath(out_path),
-        model=model,
+        model=prof.model,
         codex_path=codex_path,
+        reasoning_effort=prof.reasoning_effort,
+        codex_profile=prof.codex_profile,
     )
     contract = (
         plan_contract(baseline, fingerprint_pre, plan_paths)
@@ -1391,6 +1530,7 @@ def run_review(
             "codex_version": codex_version,
             "command": cmd,  # flag vector only; prompt is not recorded
         },
+        "profile": prof.receipt_fields(),
         "target": {
             "repository": identity["repository"],
             "worktree": worktree_abs,
