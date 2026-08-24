@@ -69,7 +69,7 @@ TRANSPORT_VERSION = 2
 SCHEMA_VERSION = 2
 VALID_REVIEW_KINDS = ("plan", "milestone")
 BLOCKING_SEVERITIES = ("critical", "high")
-MAX_PACKET_BYTES = 8_000  # mirrors validate_review_packet.py
+MAX_PACKET_BYTES = 4_000  # mirrors validate_review_packet.py
 
 # Phase 6 — observation-only quota instrumentation defaults.
 DEFAULT_QUOTA_TIMEOUT_SECONDS = 5.0

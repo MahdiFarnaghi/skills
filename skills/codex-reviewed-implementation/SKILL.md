@@ -23,6 +23,19 @@ Default for substantial multi-step work without safety-critical state semantics.
 
 Required for security, privacy, financial, durable-state, distributed, concurrency, recovery, schema-transition, compatibility, or high-impact operational work. Require the full safety lifecycle ([references/safety-lifecycle.md](references/safety-lifecycle.md)), a durable acceptance ledger, the Codex plan challenge, a failure and concurrency model, applicable real-service, cross-process, and Docker verification, milestone reviews, and a final integration review.
 
+## Reference loading policy
+
+Read each applicable reference at most once per task and retain its actionable constraints in the task capsule.
+
+- Lightweight: `review-packet.md` only.
+- Standard: `review-packet.md`; `plan-packet.md` only when a plan challenge is required.
+- Safety-critical: `safety-lifecycle.md`, `evidence-ledger.md`, `plan-packet.md`, and `review-packet.md`.
+- `codex-cli-adapter.md`: only after preflight or doctor failure, transport incompatibility, or when the wrapper's `--help` is insufficient.
+- `codex-model-selection.md`: only when policy is missing, invalid, or changing.
+- `codex-quota-observations.md`: only when quota observation is explicitly enabled.
+
+Do not reread a reference at each milestone.
+
 ## Model policy (Phase 7)
 
 Every review runs under an explicit **execution profile** — the model, reasoning effort, and policy provenance — that is resolved once, recorded in every doctor receipt, review receipt, ledger round, and quota observation, and bound by digest: a receipt for one profile never authorizes another.
@@ -40,13 +53,28 @@ Profile changes have consequences: a new profile needs a fresh doctor receipt, a
 
 ## Preconditions
 
-1. Read the repository instructions, authoritative task artifacts, current-system documentation, and relevant design decisions.
+1. Use repository instructions already present in session context. Do not reread `CLAUDE.md`, `AGENTS.md`, or imported instruction files unless they were not loaded, their contents changed during the task, or a specific ambiguity requires exact wording.
 2. Run the free transport preflight: `python3 scripts/run_codex_review.py preflight --schema schemas/codex-review-output.schema.json --worktree <abs-root>`. It verifies CLI/auth/schema/parser prerequisites without spending usage.
 3. Require a successful doctor receipt matching the exact CLI version, platform, **execution profile** (model, reasoning effort, config version, profile digest), transport version, and schema digest. If none exists (or any of those changed), run the explicit paid check once: `python3 scripts/run_codex_review.py doctor --worktree <abs-root> --schema schemas/codex-review-output.schema.json --receipt <outside-worktree-doctor.json> [--model <model>] [--reasoning-effort <e>]`. Keep the profile unchanged for every review using the receipt — or re-run doctor and advance to a new review round. The doctor proves plain `codex exec` returns output conforming to the production verdict schema and preserves read-only state. If preflight or doctor fails, STOP before implementation and offer operator-mediated review only as an explicit, user-approved fallback. Never silently downgrade.
 
 Before planning, inspect registered worktrees, active branches, HEAD, tracked and untracked changes, and any existing task ownership. Do not begin when another branch, worktree, agent, or process owns overlapping scope until ownership is reconciled. Use an isolated branch or worktree when repository policy requires it or when separation materially reduces risk; never create one without respecting user authorization and existing work.
 
 Detect whether the project is Dockerized by inspecting repository instructions, Compose files, Dockerfiles, container-oriented test commands, and deployment documentation. Record the authoritative container commands, required services, schema/bootstrap steps, health checks, volumes, and teardown procedure before planning verification.
+
+## Context acquisition discipline
+
+Do not read broad roadmap, history, or documentation files in full during initial exploration.
+
+1. Start with the exact task or phase specification named by the user.
+2. Use repository search, headings, CRG minimal-detail queries, and bounded line ranges to locate relevant current-system documentation.
+3. Read only the sections needed for the current milestone.
+4. Never read all of `plan.md`, `docs/phases/`, or a documentation directory unless the task explicitly requires a repository-wide audit.
+5. Treat implementation reports and historical phase documents as out of context unless authoritative for the requested milestone.
+6. Record selected authoritative paths in the task capsule so later milestones do not repeat discovery.
+
+## Task capsule
+
+After initial discovery, maintain one compact, untracked task-state artifact outside tracked production artifacts, with a maximum size of 4,000 characters. It contains only the objective and current milestone; authoritative paths and headings/symbols; invariants and non-goals; exact affected files; verification commands; unresolved findings or blockers; and the last accepted review round. On continuation or context compaction, read the task capsule and loop-state ledger first. Do not reconstruct completed exploration unless repository state no longer matches the capsule.
 
 ## Review supervision mode
 
@@ -69,7 +97,7 @@ The transport can optionally record pseudonymized before/after Codex quota snaps
 Inspect the active skill catalog rather than assuming a skill path or installation.
 
 - When `$tdd` is available, invoke it for each milestone that changes production behavior or fixes a bug. Follow its public-interface, one-test-at-a-time red-green-refactor loop. The reviewed milestone plan supplies the behavior and interface context; honor any additional gates required by the installed skill.
-- When `$systematic-debugging` is available, invoke it immediately for every bug, failed test or check, flake, timeout, performance regression, or unexpected result before proposing or applying a fix. Complete its root-cause, pattern, hypothesis, and implementation phases.
+- When `$systematic-debugging` is available, invoke it only for unexpected failures: an existing test that regresses, a new test failing for a reason other than its intended missing behavior, a test remaining red after minimal implementation, or a flaky, hanging, environmental, integration, or unexplained check failure. An expected first red result in the TDD loop is not a debugging event; record its intended failure reason in one sentence and continue.
 - Announce each specialized-skill invocation briefly so the user can see which workflow is active.
 - If a skill is unavailable, continue without interruption using the embedded test-first or diagnostic steps below. Do not ask the user to install it, silently skip the discipline, or claim that it ran.
 - If an installed specialized skill conflicts with repository instructions or explicit user requirements, follow the higher-priority instruction and record the adaptation.
@@ -162,27 +190,23 @@ For each milestone:
 2. **Test first** — invoke `$tdd` when available. Otherwise write one failing public-behavior test, confirm that it fails for the intended reason when feasible, implement only enough for green, and repeat one vertical behavior at a time. Never write the whole milestone's tests before implementation or refactor while red.
 3. **Implement** — make the smallest coherent production, test, schema, configuration, and documentation changes.
 4. **Verify focused behavior** — run the new test, failure cases, and load-bearing regressions. Refactor only while they remain green.
-5. **Diagnose rigorously** — invoke `$systematic-debugging` when available before any fix. Otherwise reproduce the issue, read complete errors and recent changes, inspect evidence across component boundaries, compare a working pattern, isolate the failing boundary, form and minimally test one falsifiable hypothesis, add regression evidence, apply one root-cause correction, and rerun affected plus broader checks. After three failed fixes, stop and question the architecture with the user. Do not substitute retries or longer timeouts for a root cause.
+5. **Diagnose rigorously** — expected TDD red results are governed by step 2 and are not debugging events. Apply this step only to unexpected failures. Invoke `$systematic-debugging` when available; otherwise reproduce the issue, read complete errors and recent changes, inspect evidence across component boundaries, compare a working pattern, isolate the failing boundary, form and minimally test one falsifiable hypothesis, add regression evidence, apply one root-cause correction, and rerun affected plus broader checks. After three failed fixes, stop and question the architecture with the user. Do not substitute retries or longer timeouts for a root cause.
 6. **Verify required tiers** — run every applicable tier, Docker-first rule, and hermeticity check from [references/safety-lifecycle.md](references/safety-lifecycle.md), plus repository-mandated checks. For Dockerized projects, run the relevant containerized command before review and state the images, services, migrations, and critical boundaries exercised.
 7. **Inspect architecture** — review the diff and tests against the post-green checklist in [references/safety-lifecycle.md](references/safety-lifecycle.md). Remove false claims, accidental scope, duplicated mechanisms, permissive fallbacks, temporary artifacts, and unsafe shortcuts.
 8. **Reconcile evidence and docs** — update the acceptance ledger and current-state documentation with exact results, skips, limitations, and decisions.
 9. **Prepare** — create a compact review packet from [references/review-packet.md](references/review-packet.md). Validate it with `scripts/validate_review_packet.py`.
-10. **Request review** — invoke the Codex review wrapper directly with the milestone scope and the validated packet as review focus:
+10. **Request review** — invoke the skill-local wrapper's `review` subcommand with the milestone scope and validated packet. Obtain exact arguments from `python3 <skill-root>/scripts/run_codex_review.py review --help`; the wrapper owns transport flags, read-only enforcement, target fingerprinting, schema validation, receipts, and ledger locking. Do not reproduce or override those mechanisms.
 
     ```
-    python3 scripts/run_codex_review.py review \
-      --review-kind milestone \
-      --review-phase milestone|plan_challenge|correction|final \
-      --worktree <abs-implementation-root> \
-      --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
-      --milestone <id> --round <n> \
-      --packet <validated-review-packet> \
-      --schema schemas/codex-review-output.schema.json \
+    (exact invocation intentionally omitted; use the wrapper's `review --help`)
+      (see wrapper help for phase and transport arguments)
+      (phase and transport arguments supplied by wrapper)
+      (use the wrapper's `review --help` for current arguments)
       [--model <id|cli-default>] [--reasoning-effort <e>] [--codex-profile <p>] \
-      [--require-config] \
-      --output-dir <dir-outside-the-worktree> \
-      --state-ledger <loop-state-ledger-path> \
-      --doctor-receipt <matching-doctor-receipt> \
+      (optional policy flags are owned by the wrapper)
+      (transport flags omitted; see wrapper help)
+      (state, receipt, and quota paths are owned by the wrapper)
+      (doctor receipt is supplied through the wrapper interface)
       [--quota-observations <dir-outside-the-worktree>/quota-observations.jsonl>]
     ```
 

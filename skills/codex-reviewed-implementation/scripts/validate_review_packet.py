@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 
@@ -23,10 +24,9 @@ PACKET_SCHEMAS = {
         "## Milestones",
         "## Integration strategy",
         "## Evidence strategy",
-        "## Independent review mandate",
         "## Directed questions",
     ),
-    "milestone": (
+    "milestone_legacy": (
         "# Codex milestone review",
         "## Identity",
         "## Contract",
@@ -36,8 +36,9 @@ PACKET_SCHEMAS = {
         "## Independent review mandate",
         "## Directed questions",
     ),
+    "milestone": ("# Milestone review",),
 }
-MAX_CHARACTERS = 8_000
+MAX_CHARACTERS = 4_000
 QUESTION_RE = re.compile(r"^\s*\d+\.\s+\S", re.MULTILINE)
 # An unresolved template placeholder: "<" directly followed by a letter, then
 # descriptive words, then ">". Inline code is stripped first so legitimate
@@ -66,8 +67,10 @@ VALID_DIFF_MODES = ("isolated since baseline", "cumulative working tree")
 def detect_kind(packet: str) -> str | None:
     if packet.startswith("# Codex plan review"):
         return "plan"
-    if packet.startswith("# Codex milestone review"):
+    if packet.startswith("# Milestone review"):
         return "milestone"
+    if packet.startswith("# Codex milestone review"):
+        return "milestone_legacy"
     return None
 
 
@@ -172,7 +175,8 @@ def validate(packet: str) -> tuple[str | None, list[str]]:
 
     # Required headings present and ordered.
     positions: list[int] = []
-    for heading in PACKET_SCHEMAS[kind]:
+    schema_kind = "milestone_legacy" if kind == "milestone_legacy" else kind
+    for heading in PACKET_SCHEMAS[schema_kind]:
         position = packet.find(heading)
         positions.append(position)
         if position < 0:
@@ -189,7 +193,7 @@ def validate(packet: str) -> tuple[str | None, list[str]]:
 
     # No empty required sections. The title and Directed questions are exempt:
     # the title carries no body, and Directed questions may legitimately read "None."
-    for heading in PACKET_SCHEMAS[kind]:
+    for heading in PACKET_SCHEMAS[schema_kind]:
         if heading.startswith("# ") or heading == "## Directed questions":
             continue
         body = section_body(packet, heading)
@@ -228,6 +232,13 @@ def _validate_plan(packet: str, errors: list[str]) -> None:
 
 
 def _validate_milestone(packet: str, errors: list[str]) -> None:
+    if packet.startswith("# Milestone review"):
+        required = ("Milestone", "Baseline", "Scope", "Contract", "Non-goals", "Verification", "Evidence gaps")
+        for field in required:
+            value = _flat_field_value(packet, field)
+            if _is_blank_or_placeholder(value):
+                errors.append(f"missing or blank milestone field: {field}")
+        return
     identity = section_body(packet, "## Identity")
 
     baseline = _field_value(identity, "Baseline")
@@ -274,7 +285,98 @@ def _validate_milestone(packet: str, errors: list[str]) -> None:
             )
 
 
+def _flat_field_value(packet: str, field: str) -> str | None:
+    """Return a flat packet field up to the next top-level field."""
+    pattern = re.compile(
+        rf"^[ \t]*{re.escape(field)}[ \t]*:[ \t]*(.*?)(?=^\w[\w -]*[ \t]*:|\Z)",
+        re.MULTILINE | re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(packet)
+    return match.group(1).strip() if match else None
+
+
+def _init_packet(args: argparse.Namespace) -> int:
+    if args.kind == "milestone":
+        scope = "\n".join(f"- {path}" for path in args.scope) or "- TODO: add path:symbol"
+        packet = f"""# Milestone review
+
+Milestone: {args.milestone}
+Baseline: {args.baseline}
+Scope:
+{scope}
+
+Contract:
+- TODO: observable outcome
+
+Non-goals:
+- TODO: scope exclusion
+
+Verification:
+- TODO: exact command — result
+
+Evidence gaps:
+- TODO: none or exact gap
+
+Prior findings:
+- none
+
+Directed questions:
+- none
+"""
+    else:
+        packet = """# Codex plan review
+
+## Objective
+TODO: concise objective
+
+## Authority
+- Specification: TODO: authoritative path or user contract
+- Allowed delivery actions: TODO: boundaries
+- Human gates: TODO: decisions returned to the user
+
+## Global invariants
+- TODO: invariant
+
+## Milestones
+### M1: TODO
+- Contract: TODO
+- Acceptance: TODO
+- Dependencies: none
+- Non-goals: TODO
+
+## Integration strategy
+- TODO
+
+## Evidence strategy
+- Acceptance ledger: TODO
+- Required verification tiers: TODO
+- Docker strategy: not applicable
+
+## Directed questions
+None.
+
+## Known uncertainties
+- TODO
+"""
+    if args.output:
+        args.output.write_text(packet, encoding="utf-8")
+    else:
+        print(packet, end="")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
+        init = argparse.ArgumentParser(
+            prog=f"{sys.argv[0]} init", description="generate a compact packet scaffold"
+        )
+        init.add_argument("--kind", choices=("plan", "milestone"), required=True)
+        init.add_argument("--milestone", default="M1")
+        init.add_argument("--baseline", default="HEAD")
+        init.add_argument("--scope", nargs="+", default=[])
+        init.add_argument("--output", type=Path)
+        return _init_packet(init.parse_args(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packet", type=Path, help="path to the Markdown review packet")
     args = parser.parse_args()
