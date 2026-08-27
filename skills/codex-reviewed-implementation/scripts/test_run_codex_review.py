@@ -117,7 +117,7 @@ class FakeRunner:
 
 def base_verdict(worktree: str, scope: str = "uncommitted", baseline: str = "deadbeefcafebabe000000000000000000000000", *, verdict: str = "approve", findings=None) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": rcr.SCHEMA_VERSION,
         "review_kind": "milestone",
         "verdict": verdict,
         "summary": "Looks good.",
@@ -144,6 +144,7 @@ def finding(**over) -> dict:
         "evidence": "ev",
         "affected_behavior": "ab",
         "recommendation": "r",
+        "origin": "independent",
     }
     base.update(over)
     return base
@@ -322,7 +323,9 @@ def _valid_inputs(**over):
 
 def test_validate_inputs_ok(tmp_path):
     packet = tmp_path / "p.md"; packet.write_text("x")
-    schema = tmp_path / "s.json"; schema.write_text('{"properties":{"schema_version":{"const":2}}}')
+    schema = tmp_path / "s.json"; schema.write_text(
+        json.dumps({"properties": {"schema_version": {"const": rcr.SCHEMA_VERSION}}})
+    )
     wt = tmp_path / "wt"; wt.mkdir()
     out = tmp_path / "out"
     errs = rcr.validate_inputs(**_valid_inputs(
@@ -588,6 +591,51 @@ def test_run_review_target_changed(tmp_path):
         dirty_lines=[" M pre.py\n"], mutate_on_review=True,
     )
     assert res.outcome == "target_changed"
+
+
+def test_packet_fingerprint_ignores_unrelated_untracked_file(tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir(); (wt / ".git").mkdir()
+    (wt / "src").mkdir()
+    (wt / "src" / "target.py").write_text("target")
+    packet = tmp_path / "packet.md"
+    packet.write_text("Scope: src/target.py")
+    out = tmp_path / "out"
+    fake = FakeRunner(worktree=str(wt), verdict=base_verdict(str(wt)),
+                      dirty_lines=["?? src/target.py\n", "?? scratch.txt\n"])
+    (wt / "src" / "target.py").write_text("target")
+    (wt / "scratch.txt").write_text("unrelated")
+    res = rcr.run_review(
+        worktree=str(wt), scope="uncommitted", packet_path=str(packet),
+        schema_path=str(tmp_path / "schema.json"), output_dir=str(out),
+        milestone="m1", round_no=1, runner=fake, fingerprint_scope="packet",
+    )
+    assert res.outcome == "completed"
+
+
+def test_packet_fingerprint_requires_named_existing_path(tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir(); (wt / ".git").mkdir()
+    packet = tmp_path / "packet.md"; packet.write_text("no repository path")
+    res = rcr.run_review(
+        worktree=str(wt), scope="uncommitted", packet_path=str(packet),
+        schema_path=str(tmp_path / "schema.json"), output_dir=str(tmp_path / "out"),
+        milestone="m1", round_no=1, runner=FakeRunner(worktree=str(wt)),
+        fingerprint_scope="packet",
+    )
+    assert res.outcome == "input_invalid"
+    assert "existing repository path" in res.diagnostics
+
+
+def test_validate_verdict_rejects_missing_finding_origin(tmp_path):
+    v = base_verdict(str(tmp_path))
+    v["findings"] = [finding()]
+    del v["findings"][0]["origin"]
+    errors = rcr.validate_verdict(
+        v, expected_review_kind="milestone", expected_repository=str(tmp_path),
+        expected_worktree=str(tmp_path), expected_scope="uncommitted",
+        expected_baseline=v["target"]["baseline"], expected_target_ref="f" * 64,
+    )
+    assert any("origin" in error for error in errors)
 
 
 def test_run_review_wrong_worktree_verdict_rejected(tmp_path):

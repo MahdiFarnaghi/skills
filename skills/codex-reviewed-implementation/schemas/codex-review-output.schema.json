@@ -9,7 +9,7 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "review_kind": {
       "type": "string",
@@ -64,7 +64,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "severity", "title", "explanation", "file", "line", "evidence", "affected_behavior", "recommendation"],
+        "required": ["id", "severity", "title", "explanation", "file", "line", "evidence", "affected_behavior", "recommendation", "origin"],
         "properties": {
           "id": {
             "type": "string",
@@ -105,6 +105,11 @@
             "type": "string",
             "minLength": 1,
             "description": "The smallest concrete correction that addresses the root cause."
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["independent", "directed"],
+            "description": "The review pass that produced this finding: the independent sweep or the directed challenge."
           }
         }
       }

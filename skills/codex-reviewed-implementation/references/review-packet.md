@@ -35,4 +35,5 @@ Directed questions:
 - List paths and symbols; do not paste diffs or long logs.
 - State only results observed in the current worktree and name a resolvable baseline.
 - Keep the contract independent of implementation history and ask zero to three counterexample-oriented questions.
+- Findings in the structured verdict must identify whether they came from the independent sweep or directed challenge using the schema-bound `origin` field.
 - Never include secrets, credentials, private data, or conversation transcripts.

@@ -6,7 +6,8 @@ through the public Codex CLI, converges on approval, and stops at the boundary.
 This reference defines the required capability contract, records whether the
 installed CLI provides it, and pins the exact verified invocation.
 
-This replaces the earlier plugin-only adapter. The Claude-side Codex **plugin**
+Historical delivery notes are kept in `decisions.md`; this reference describes
+the current adapter. The Claude-side Codex **plugin**
 (`/codex:review`, `/codex:adversarial-review`) is operator-only
 (`disable-model-invocation: true`) and is retained here only as a labeled
 fallback. Plain structured Codex **CLI** execution (`codex exec`) is the public
@@ -60,7 +61,8 @@ Verified directly against the installed CLI (probe-confirmed, not assumed):
 
 All seven capabilities are satisfied for Standard and Lightweight review.
 Capability 7 is layered (prompt + flag), not cryptographic; for Safety-critical
-use the runtime read-only and instruction-boundary tests (Workstream 9) must
+use the runtime read-only and instruction-boundary tests documented by the
+skill must
 prove the boundary holds.
 
 ## Verified invocation (the only form the wrapper uses)
@@ -93,16 +95,22 @@ python3 scripts/run_codex_review.py review \
   --worktree <abs-root> --scope uncommitted|base|commit [--base <ref>|--commit <sha>] \
   --milestone <id> --round <n> --packet <packet> --schema <schema> \
   --output-dir <dir-outside-worktree> [--timeout <sec>] [--model <m>] \
+  [--fingerprint-scope worktree|packet] \
   --doctor-receipt <matching-doctor.json> [--state-ledger <path>]
 ```
 
 Preflight spends no Codex usage: it checks the binary, version, auth, schema,
 and the `-s`-at-exec-level invariant via a zero-cost arg-parse probe. Review
-returns a closed failure enum (`completed`, `process_failed`, `timed_out`,
-`invalid_output`, `target_changed`, `cli_missing`, `cancelled`) with a fixed
-remediation string per value. Exit 0 means a valid verdict was obtained; read
-the receipt for `approve` versus `needs-attention`. Every transport failure exits
+returns a closed failure enum with a fixed remediation string per value; the
+authoritative mapping is `OUTCOMES` in `scripts/run_codex_review.py`. Exit 0
+means a valid verdict was obtained; read the receipt for `approve` versus
+`needs-attention`. Every transport failure exits
 non-zero and produces no verdict.
+
+The verdict schema is version 3. Existing doctor receipts are invalidated by
+the schema digest and must be regenerated. Existing review outputs without the
+required finding `origin` field are rejected; start a new review round after
+upgrading.
 
 ## Fallback mode — operator-mediated plugin review (NOT the automated path)
 
@@ -142,7 +150,8 @@ and by `--ignore-rules`: it must review repository evidence directly and must no
 load Claude-facing skill, companion-plugin, or orchestration instructions, and
 must not delegate back to Claude. There is no cryptographic origin marker in the
 CLI; the boundary is enforced by prompt plus flag and proved by the
-instruction-boundary forward test.
+instruction-boundary forward test. Finding provenance is schema-bound metadata
+from the review call, not a cryptographic process-origin claim.
 
 ## Decision procedure
 

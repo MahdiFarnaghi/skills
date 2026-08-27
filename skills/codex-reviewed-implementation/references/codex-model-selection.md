@@ -10,10 +10,8 @@ quota observations. `profile_digest` hashes only execution-affecting fields
 model/effort pins — see "Native-binding boundary" below) — provenance
 (`resolution_source`) is recorded but never changes authorization.
 
-Before Phase 7, `--model` defaulted to `None`, so reviews silently ran
-whatever `~/.codex/config.toml` pinned and receipts recorded `model: null`,
-leaving no local trace of the effective model. Phase 7 exists to close that
-gap.
+The resolved model and effort are recorded in every receipt, ledger round, and
+observation, so the effective execution policy is locally auditable.
 
 ## Resolution precedence
 
@@ -127,5 +125,7 @@ the file a `-p` profile selects: doing so would invalidate every doctor
 receipt on any unrelated user-config edit. Residual risk, accepted and
 documented: a user editing *other* execution-affecting settings inside a
 selected profile file can change what runs without changing the digest.
-Tightening this (e.g., hashing the resolved profile file) is an open design
-question in TODOS.md.
+This boundary is deliberate: the wrapper does not resolve or parse native Codex
+profile internals. Treat a selected `-p` profile as an external execution
+dependency and re-run doctor after changing it; never reuse a receipt across an
+unverified native profile change.

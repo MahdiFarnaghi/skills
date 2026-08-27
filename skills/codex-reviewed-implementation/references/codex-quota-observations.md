@@ -7,7 +7,7 @@ data is **never load-bearing**: it cannot gate, block, cancel, retry, defer, or
 reorder a review, and missing/ambiguous/incompatible data must never change a
 review outcome.
 
-This milestone exists because an `/autoplan` review (2026-08-13) established
+The observation design follows the skill's requirement that quota data remain
 that the Codex quota RPC (`account/rateLimits/read`, exposed by the experimental
 `codex app-server`) is a semantically weak, still-churning signal: `usedPercent`
 is a coarse integer, the weekly window cannot be reliably identified, and a
