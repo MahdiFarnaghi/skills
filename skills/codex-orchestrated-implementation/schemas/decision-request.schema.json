@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Terra decision request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "request_id", "idempotency_key", "task_id", "milestone_id", "milestone_index", "requested_by", "authority_role", "question", "reason", "binding", "status", "supersedes_request_id"],
+  "properties": {
+    "schema_version": {"const": 2}, "record_type": {"const": "request"},
+    "request_id": {"type": "string", "minLength": 1}, "idempotency_key": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1}, "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1}, "requested_by": {"type": "string", "minLength": 1},
+    "authority_role": {"const": "technical_authority"}, "question": {"type": "string", "minLength": 1},
+    "reason": {"type": "string", "minLength": 1}, "binding": {"$ref": "decision-record.schema.json#/$defs/binding"},
+    "status": {"const": "pending"}, "supersedes_request_id": {"type": ["string", "null"]}
+  }
+}

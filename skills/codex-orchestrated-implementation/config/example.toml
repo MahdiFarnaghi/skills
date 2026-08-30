@@ -1,23 +1,48 @@
-version = 1
+version = 2
 
-[orchestrator]
+[technical_authority]
 provider = "codex"
 model = "gpt-5.6-terra"
 reasoning_effort = "high"
 
+[orchestrator]
+provider = "codex"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+
 [[pair]]
-name = "worker_a"
-provider = "claude_code"
-model = "opus"
+name = "luna_worker"
+provider = "codex"
+model = "gpt-5.6-luna"
 enabled = true
 
 [[pair]]
-name = "worker_b"
-provider = "codex"
-model = "gpt-5.6-luna"
+name = "claude_worker"
+provider = "claude_code"
+model = "opus"
 enabled = true
 
 [workflow]
 profile = "standard"
 pairing_mode = "alternating"
-first_implementer = "worker_a"
+first_implementer = "luna_worker"
+
+[qwen_local]
+enabled = false
+endpoint = "https://127.0.0.1:8000/v1"
+allowed_endpoints = ["https://127.0.0.1:8000/v1"]
+model = "Qwen3.8-27B"
+allowed_models = ["Qwen3.8-27B"]
+tls_policy = "required"
+auth_mode = "none"
+auth_token_env = ""
+max_context_tokens = 4096
+max_input_tokens = 2048
+max_output_tokens = 1024
+reasoning_effort = "low"
+timeout_seconds = 20
+max_retries = 0
+tools = false
+skills = false
+inherit_credentials = false
+write_mode = "disabled"

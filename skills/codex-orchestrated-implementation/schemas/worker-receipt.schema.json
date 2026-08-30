@@ -11,7 +11,7 @@
     "outcome"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "task_id": {"type": "string", "minLength": 1},
     "milestone_id": {"type": "string", "minLength": 1},
     "milestone_index": {"type": "integer", "minimum": 1},
@@ -37,6 +37,13 @@
     "read_only": {"type": "boolean"},
     "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "resolved_orchestrator_profile": {"$ref": "round-ledger.schema.json#/$defs/execution_profile"},
+    "full_worktree_fingerprint_before": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "full_worktree_fingerprint_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "role_instance_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "host_id": {"type": "string", "minLength": 1},
+    "context_id": {"type": "string", "minLength": 1},
+    "resolved_profile": {"$ref": "round-ledger.schema.json#/$defs/execution_profile"},
     "files_changed": {"type": "array", "items": {"type": "string"}},
     "files_inspected": {"type": "array", "items": {"type": "string"}},
     "commands": {"type": "array", "items": {"type": "string"}},
@@ -46,5 +53,9 @@
     "findings": {"type": "array", "items": {"type": "string"}},
     "next_action": {"type": "string"},
     "outcome": {"enum": ["success", "failure", "transport_failure", "needs_correction", "approve", "escalate"]}
-  }
+  },
+  "allOf": [{
+    "if": {"properties": {"schema_version": {"const": 2}}},
+    "then": {"required": ["full_worktree_fingerprint_before", "full_worktree_fingerprint_after", "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile"]}
+  }]
 }

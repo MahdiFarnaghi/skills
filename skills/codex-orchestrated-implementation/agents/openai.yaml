@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex-Orchestrated Implementation"
-  short_description: "Terra-coordinated implementation with configurable Luna and Claude workers"
-  default_prompt: "Use $codex-orchestrated-implementation to coordinate this substantial or high-risk task with Terra as orchestrator and configurable Codex or Claude implementation and review workers."
+  short_description: "Terra-authorized implementation with reciprocal Luna and Claude workers"
+  default_prompt: "Use $codex-orchestrated-implementation for a Terra-authorized task with Luna as execution orchestrator, exactly luna_worker and claude_worker alternating implementation/review, and optional read-only Qwen assistance."

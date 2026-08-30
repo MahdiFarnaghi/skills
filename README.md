@@ -38,9 +38,11 @@ correction limits, and safety-critical verification.
 
 Use it when work benefits from delegated implementation and reciprocal review.
 The target must be a Git repository with a project-level
-`.codex-orchestration.toml`; copy `config/example.toml` to create one. Qwen3.8-
-27B support is planned in Phase 1 of [`plan.md`](plan.md), but is not yet an
-available worker provider.
+`.codex-orchestration.toml`; copy `config/example.toml` to create one. The v2
+policy uses Terra as technical authority, Luna as orchestrator, and alternating
+Luna/Claude workers. It also supports an optional constrained Qwen3.8-27B local
+assistant for bounded read-only tasks; Qwen is never an authority, reviewer, or
+completion agent.
 
 ## Installation
 
@@ -124,6 +126,13 @@ python3.11 -m pytest \
   ~/.codex/skills/codex-orchestrated-implementation/scripts/test_validate_config.py \
   ~/.codex/skills/codex-orchestrated-implementation/scripts/test_validate_handoff.py \
   ~/.codex/skills/codex-orchestrated-implementation/scripts/test_end_to_end.py
+```
+
+The control-plane and Qwen contract tests are included in the same package and
+can be run with:
+
+```sh
+python3.11 -m pytest ~/.codex/skills/codex-orchestrated-implementation/scripts/test_control_plane.py
 ```
 
 ## Contributing

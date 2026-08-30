@@ -25,3 +25,16 @@ contradictory, duplicate, or scope-mismatched receipt is not a verdict. The
 helper's optional JSONL store is append-only; a repeated invocation id is
 accepted only when its canonical content has the same digest, making
 restart/re-entry idempotent.
+
+V2 receipts additionally include the worker's `role_instance_id`,
+`session_id`, `host_id`, `context_id`, and resolved worker profile. The v2
+ledger carries matching runtime bindings for exactly `technical_authority`,
+`orchestrator`, `luna_worker`, and `claude_worker`; all four values for each
+identity field must be distinct. V2 receipts also include full-worktree
+fingerprints, and a reviewer must prove that its full before/after values are
+unchanged.
+
+The optional Qwen assistant never uses a worker receipt. It emits the
+structured `schemas/qwen-receipt.schema.json` receipt, marked read-only and
+untrusted. Its output is evidence only and cannot become a verdict or direct
+worktree change.

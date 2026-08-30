@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 CONFIG_VERSION = 1
+CONFIG_V2_VERSION = 2
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
@@ -26,11 +27,24 @@ PROFILES = frozenset({"lightweight", "standard", "safety-critical"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 CLAUDE_CODE_MODELS = frozenset({"fable", "opus", "sonnet", "haiku"})
 PROVIDERS = frozenset({"codex", "claude_code"})
+QWEN_PROVIDER = "qwen_local"
 
 TOP_LEVEL_KEYS = frozenset({"version", "orchestrator", "pair", "workflow"})
+V2_TOP_LEVEL_KEYS = frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow", "qwen_local"})
 ORCHESTRATOR_KEYS = frozenset({"provider", "model", "reasoning_effort"})
+V2_CONTROL_PLANE_KEYS = frozenset({"provider", "model", "reasoning_effort"})
 PAIR_KEYS = frozenset({"name", "provider", "model", "enabled"})
 WORKFLOW_KEYS = frozenset({"profile", "pairing_mode", "first_implementer"})
+QWEN_KEYS = frozenset({
+    "enabled", "endpoint", "allowed_endpoints", "model", "allowed_models", "tls_policy",
+    "auth_mode", "auth_token_env", "max_context_tokens", "max_input_tokens", "max_output_tokens",
+    "reasoning_effort", "timeout_seconds", "max_retries", "tools", "skills", "inherit_credentials",
+    "write_mode",
+})
+QWEN_REASONING_EFFORTS = frozenset({"low", "medium"})
+QWEN_TLS_POLICIES = frozenset({"required", "localhost_insecure"})
+QWEN_AUTH_MODES = frozenset({"none", "explicit_env"})
+QWEN_WRITE_MODES = frozenset({"disabled", "draft_patch"})
 
 
 class ConfigError(ValueError):
@@ -107,10 +121,135 @@ def _provider_model(value: Mapping[str, Any], label: str) -> None:
         )
 
 
+def _validate_v2_qwen(qwen: Mapping[str, Any]) -> None:
+    _closed_keys(qwen, QWEN_KEYS, "qwen_local")
+    _required(qwen, QWEN_KEYS, "qwen_local")
+    if type(qwen["enabled"]) is not bool:
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.enabled must be boolean")
+    endpoint = _string(qwen["endpoint"], "qwen_local.endpoint")
+    endpoints = qwen["allowed_endpoints"]
+    models = qwen["allowed_models"]
+    if (not isinstance(endpoints, list) or not endpoints or
+            any(not isinstance(item, str) or not item for item in endpoints) or
+            len(set(endpoints)) != len(endpoints) or endpoint not in endpoints):
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.allowed_endpoints must uniquely include endpoint")
+    model = _string(qwen["model"], "qwen_local.model")
+    if (not isinstance(models, list) or not models or
+            any(not isinstance(item, str) or not item for item in models) or
+            len(set(models)) != len(models) or model not in models):
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.allowed_models must uniquely include model")
+    if model != "Qwen3.8-27B":
+        raise ConfigError("E_QWEN_MODEL_NOT_ALLOWED", "qwen_local.model must be Qwen3.8-27B")
+    if any(not item.startswith(("http://", "https://")) for item in endpoints):
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local endpoints must use http:// or https://")
+    tls_policy = _string(qwen["tls_policy"], "qwen_local.tls_policy")
+    if tls_policy not in QWEN_TLS_POLICIES:
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.tls_policy must be required or localhost_insecure")
+    from urllib.parse import urlparse
+    for item in endpoints:
+        parsed = urlparse(item)
+        if not parsed.netloc or parsed.query or parsed.fragment:
+            raise ConfigError("E_QWEN_CONFIG", f"qwen_local endpoint {item!r} is not a safe base URL")
+        if parsed.scheme == "http" and (tls_policy != "localhost_insecure" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}):
+            raise ConfigError("E_QWEN_TLS_REQUIRED", "unencrypted Qwen endpoints are allowed only for localhost_insecure")
+    auth_mode = _string(qwen["auth_mode"], "qwen_local.auth_mode")
+    if auth_mode not in QWEN_AUTH_MODES:
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.auth_mode must be none or explicit_env")
+    token_env = qwen["auth_token_env"]
+    if not isinstance(token_env, str) or (auth_mode == "none" and token_env) or (auth_mode == "explicit_env" and not re.fullmatch(r"[A-Z][A-Z0-9_]*", token_env)):
+        raise ConfigError("E_QWEN_AUTH_POLICY", "auth_token_env must be empty for none or an explicit uppercase env name")
+    if qwen["tls_policy"] == "required" and any(item.startswith("http://") for item in endpoints):
+        raise ConfigError("E_QWEN_TLS_REQUIRED", "qwen_local.tls_policy=required forbids http endpoints")
+    for key, minimum, maximum in (("max_context_tokens", 256, 32768), ("max_input_tokens", 1, 32768), ("max_output_tokens", 1, 8192), ("timeout_seconds", 1, 120), ("max_retries", 0, 3)):
+        value = qwen[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigError("E_QWEN_BUDGET", f"qwen_local.{key} must be an integer in [{minimum}, {maximum}]")
+    if qwen["max_input_tokens"] + qwen["max_output_tokens"] > qwen["max_context_tokens"]:
+        raise ConfigError("E_QWEN_BUDGET", "Qwen input plus output budgets exceed max_context_tokens")
+    effort = _string(qwen["reasoning_effort"], "qwen_local.reasoning_effort")
+    if effort not in QWEN_REASONING_EFFORTS:
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.reasoning_effort must be low or medium")
+    for key in ("tools", "skills", "inherit_credentials"):
+        if qwen[key] is not False:
+            raise ConfigError("E_QWEN_CAPABILITY_POLICY", f"qwen_local.{key} must be false")
+    write_mode = _string(qwen["write_mode"], "qwen_local.write_mode")
+    if write_mode not in QWEN_WRITE_MODES:
+        raise ConfigError("E_QWEN_CONFIG", "qwen_local.write_mode must be disabled or draft_patch")
+    if not qwen["enabled"] and write_mode != "disabled":
+        raise ConfigError("E_QWEN_WRITE_POLICY", "disabled Qwen assistant must have write_mode=disabled")
+
+
+def _validate_v2(root: Mapping[str, Any]) -> dict[str, Any]:
+    _closed_keys(root, V2_TOP_LEVEL_KEYS, "root")
+    _required(root, frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow"}), "root")
+    if type(root["version"]) is not int or root["version"] != CONFIG_V2_VERSION:
+        raise ConfigError("E_CONFIG_SCHEMA", "version must be the integer 2")
+    authority = _mapping(root["technical_authority"], "technical_authority")
+    _closed_keys(authority, V2_CONTROL_PLANE_KEYS, "technical_authority")
+    _required(authority, V2_CONTROL_PLANE_KEYS, "technical_authority")
+    _provider_model(authority, "technical_authority")
+    if authority["provider"] != "codex" or not authority["model"].endswith("-terra"):
+        raise ConfigError("E_CONTROL_PLANE_ROLE", "technical_authority must be a Codex Terra model")
+    if _string(authority["reasoning_effort"], "technical_authority.reasoning_effort") not in REASONING_EFFORTS:
+        raise ConfigError("E_CONFIG_SCHEMA", "technical_authority.reasoning_effort is unsupported")
+    orchestrator = _mapping(root["orchestrator"], "orchestrator")
+    _closed_keys(orchestrator, V2_CONTROL_PLANE_KEYS, "orchestrator")
+    _required(orchestrator, V2_CONTROL_PLANE_KEYS, "orchestrator")
+    _provider_model(orchestrator, "orchestrator")
+    if orchestrator["provider"] != "codex" or not orchestrator["model"].endswith("-luna"):
+        raise ConfigError("E_CONTROL_PLANE_ROLE", "orchestrator must be a Codex Luna model")
+    if _string(orchestrator["reasoning_effort"], "orchestrator.reasoning_effort") not in REASONING_EFFORTS:
+        raise ConfigError("E_CONFIG_SCHEMA", "orchestrator.reasoning_effort is unsupported")
+    pair = root["pair"]
+    if not isinstance(pair, list) or len(pair) != 2:
+        raise ConfigError("E_PAIR_CARDINALITY", "v2 pair must contain exactly luna_worker and claude_worker")
+    names: list[str] = []
+    for index, member_value in enumerate(pair):
+        label = f"pair[{index}]"
+        member = _mapping(member_value, label)
+        _closed_keys(member, PAIR_KEYS, label)
+        _required(member, PAIR_KEYS, label)
+        name = _string(member["name"], f"{label}.name")
+        if name not in {"luna_worker", "claude_worker"}:
+            raise ConfigError("E_PAIR_ROLE", "v2 pair names must be luna_worker and claude_worker")
+        names.append(name)
+        if member["enabled"] is not True:
+            raise ConfigError("E_PAIR_CARDINALITY", "v2 pair members must both be enabled")
+        _provider_model(member, label)
+        if name == "luna_worker" and (member["provider"] != "codex" or not member["model"].endswith("-luna")):
+            raise ConfigError("E_PAIR_ROLE", "luna_worker must use a Codex Luna model")
+        if name == "claude_worker" and member["provider"] != "claude_code":
+            raise ConfigError("E_PAIR_ROLE", "claude_worker must use claude_code")
+    if set(names) != {"luna_worker", "claude_worker"}:
+        raise ConfigError("E_PAIR_ROLE", "v2 pair must contain each named worker exactly once")
+    workflow = _mapping(root["workflow"], "workflow")
+    _closed_keys(workflow, WORKFLOW_KEYS, "workflow")
+    _required(workflow, WORKFLOW_KEYS, "workflow")
+    if _string(workflow["profile"], "workflow.profile") not in PROFILES:
+        raise ConfigError("E_CONFIG_SCHEMA", "unsupported workflow.profile")
+    if _string(workflow["pairing_mode"], "workflow.pairing_mode") != "alternating":
+        raise ConfigError("E_PAIRING_MODE", "v2 pairing_mode must be alternating")
+    if _string(workflow["first_implementer"], "workflow.first_implementer") not in names:
+        raise ConfigError("E_FIRST_IMPLEMENTER", "first_implementer must name a v2 pair member")
+    if "qwen_local" in root:
+        _validate_v2_qwen(_mapping(root["qwen_local"], "qwen_local"))
+    else:
+        root = dict(root)
+        root["qwen_local"] = {
+            "enabled": False, "endpoint": "https://127.0.0.1:8000/v1", "allowed_endpoints": ["https://127.0.0.1:8000/v1"],
+            "model": "Qwen3.8-27B", "allowed_models": ["Qwen3.8-27B"], "tls_policy": "required", "auth_mode": "none", "auth_token_env": "",
+            "max_context_tokens": 4096, "max_input_tokens": 2048, "max_output_tokens": 1024, "reasoning_effort": "low", "timeout_seconds": 20, "max_retries": 0,
+            "tools": False, "skills": False, "inherit_credentials": False, "write_mode": "disabled",
+        }
+    return dict(root)
+
+
 def validate_data(data: Any) -> dict[str, Any]:
     """Validate parsed TOML and return the original policy."""
 
     root = _mapping(data, "root")
+    if root.get("version") == CONFIG_V2_VERSION:
+        return _validate_v2(root)
     _closed_keys(root, TOP_LEVEL_KEYS, "root")
     _required(root, TOP_LEVEL_KEYS, "root")
 

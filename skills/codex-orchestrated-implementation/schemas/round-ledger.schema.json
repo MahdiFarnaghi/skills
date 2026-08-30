@@ -24,10 +24,22 @@
         "resolution_source": {"type": "string", "minLength": 1},
         "profile_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
+    },
+    "runtime_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile"],
+      "properties": {
+        "role": {"type": "string", "enum": ["technical_authority", "orchestrator", "luna_worker", "claude_worker"]},
+        "role_instance_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "host_id": {"type": "string", "minLength": 1},
+        "context_id": {"type": "string", "minLength": 1},
+        "resolved_profile": {"$ref": "#/$defs/execution_profile"}
+      }
     }
   },
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "task_id": {"type": "string", "minLength": 1},
     "milestone_id": {"type": "string", "minLength": 1},
     "milestone_index": {"type": "integer", "minimum": 1},
@@ -50,7 +62,21 @@
     "implementation_invocation_id": {"type": "string", "minLength": 1},
     "review_invocation_id": {"type": "string", "minLength": 1},
     "correction_review_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 2}},
+    "runtime_bindings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["technical_authority", "orchestrator", "luna_worker", "claude_worker"],
+      "properties": {
+        "technical_authority": {"$ref": "#/$defs/runtime_binding"},
+        "orchestrator": {"$ref": "#/$defs/runtime_binding"},
+        "luna_worker": {"$ref": "#/$defs/runtime_binding"},
+        "claude_worker": {"$ref": "#/$defs/runtime_binding"}
+      }
+    },
     "status": {"enum": ["open", "reviewed", "needs_correction", "accepted", "escalated"]},
     "finding_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
-  }
+  },
+  "allOf": [{
+    "if": {"properties": {"schema_version": {"const": 2}}},
+    "then": {"required": ["runtime_bindings"]}
+  }]
 }

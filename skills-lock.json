@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "codex-orchestrated-implementation": {
+      "source": "mahdifarnaghi/skills",
+      "sourceType": "github",
+      "skillPath": "skills/codex-orchestrated-implementation/SKILL.md",
+      "computedHash": "cd194ae4cc8b0c54912352e21f228c624246d8514e06e2534305528101a145a3"
+    }
+  }
+}

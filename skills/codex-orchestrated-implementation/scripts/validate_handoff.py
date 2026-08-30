@@ -29,6 +29,13 @@ RECEIPT_REQUIRED = frozenset(
 RECEIPT_ALLOWED = RECEIPT_REQUIRED | frozenset(
     {"files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action"}
 )
+V2_RECEIPT_REQUIRED = RECEIPT_REQUIRED | frozenset({
+    "full_worktree_fingerprint_before", "full_worktree_fingerprint_after",
+    "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile",
+})
+V2_RECEIPT_ALLOWED = V2_RECEIPT_REQUIRED | frozenset(
+    {"files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action"}
+)
 LEDGER_REQUIRED = frozenset(
     {
         "schema_version", "task_id", "milestone_id", "milestone_index", "round",
@@ -41,9 +48,13 @@ LEDGER_REQUIRED = frozenset(
     }
 )
 LEDGER_ALLOWED = LEDGER_REQUIRED | frozenset({"finding_ids"})
+V2_LEDGER_REQUIRED = LEDGER_REQUIRED | frozenset({"runtime_bindings"})
+V2_LEDGER_ALLOWED = V2_LEDGER_REQUIRED | frozenset({"finding_ids"})
 PROFILE_KEYS = frozenset(
     {"provider", "model", "reasoning_effort", "host_identity", "resolution_source", "profile_digest"}
 )
+RUNTIME_ROLES = frozenset({"technical_authority", "orchestrator", "luna_worker", "claude_worker"})
+RUNTIME_BINDING_KEYS = frozenset({"role", "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile"})
 
 
 class HandoffError(ValueError):
@@ -115,11 +126,43 @@ def _profile(value: Any, label: str) -> Mapping[str, Any]:
     return profile
 
 
+def _runtime_binding(value: Any, label: str) -> Mapping[str, Any]:
+    binding = _mapping(value, label)
+    _closed(binding, RUNTIME_BINDING_KEYS, RUNTIME_BINDING_KEYS, label)
+    role = _string(binding["role"], f"{label}.role")
+    if role not in RUNTIME_ROLES:
+        raise HandoffError("E_RUNTIME_ROLE", f"{label}.role is not a v2 control-plane or pair role")
+    for key in ("role_instance_id", "session_id", "host_id", "context_id"):
+        _string(binding[key], f"{label}.{key}")
+    _profile(binding["resolved_profile"], f"{label}.resolved_profile")
+    return binding
+
+
+def _runtime_bindings(value: Any, label: str = "runtime_bindings") -> Mapping[str, Mapping[str, Any]]:
+    bindings = _mapping(value, label)
+    if set(bindings) != RUNTIME_ROLES:
+        raise HandoffError("E_RUNTIME_BINDING", f"{label} must bind exactly {', '.join(sorted(RUNTIME_ROLES))}")
+    result: dict[str, Mapping[str, Any]] = {}
+    for role in sorted(RUNTIME_ROLES):
+        binding = _runtime_binding(bindings[role], f"{label}.{role}")
+        _same(binding["role"], role, f"{label}.{role}.role")
+        result[role] = binding
+    for key in ("role_instance_id", "session_id", "host_id", "context_id"):
+        values = [result[role][key] for role in RUNTIME_ROLES]
+        if len(set(values)) != len(values):
+            raise HandoffError("E_RUNTIME_IDENTITY_REUSE", f"runtime {key} values must be distinct across all four roles")
+    return result
+
+
 def _receipt(value: Any, label: str) -> Mapping[str, Any]:
     receipt = _mapping(value, label)
-    _closed(receipt, RECEIPT_REQUIRED, RECEIPT_ALLOWED, label)
-    if receipt["schema_version"] != 1:
-        raise HandoffError("E_HANDOFF_SCHEMA", f"{label}.schema_version must be 1")
+    version = receipt.get("schema_version")
+    if version == 2:
+        _closed(receipt, V2_RECEIPT_REQUIRED, V2_RECEIPT_ALLOWED, label)
+    else:
+        _closed(receipt, RECEIPT_REQUIRED, RECEIPT_ALLOWED, label)
+    if version not in {1, 2}:
+        raise HandoffError("E_HANDOFF_SCHEMA", f"{label}.schema_version must be 1 or 2")
     for key in ("task_id", "milestone_id", "invocation_id", "pair_member", "provider", "model", "role", "outcome"):
         _string(receipt[key], f"{label}.{key}")
     _integer(receipt["milestone_index"], f"{label}.milestone_index", 1)
@@ -139,14 +182,24 @@ def _receipt(value: Any, label: str) -> Mapping[str, Any]:
     _digest(receipt["target_fingerprint_after"], f"{label}.target_fingerprint_after")
     _digest(receipt["policy_digest"], f"{label}.policy_digest")
     _profile(receipt["resolved_orchestrator_profile"], f"{label}.resolved_orchestrator_profile")
+    if version == 2:
+        for key in ("role_instance_id", "session_id", "host_id", "context_id"):
+            _string(receipt[key], f"{label}.{key}")
+        _profile(receipt["resolved_profile"], f"{label}.resolved_profile")
+        _digest(receipt["full_worktree_fingerprint_before"], f"{label}.full_worktree_fingerprint_before")
+        _digest(receipt["full_worktree_fingerprint_after"], f"{label}.full_worktree_fingerprint_after")
     return receipt
 
 
 def _ledger(value: Any) -> Mapping[str, Any]:
     ledger = _mapping(value, "ledger")
-    _closed(ledger, LEDGER_REQUIRED, LEDGER_ALLOWED, "ledger")
-    if ledger["schema_version"] != 1:
-        raise HandoffError("E_HANDOFF_SCHEMA", "ledger.schema_version must be 1")
+    version = ledger.get("schema_version")
+    if version == 2:
+        _closed(ledger, V2_LEDGER_REQUIRED, V2_LEDGER_ALLOWED, "ledger")
+    else:
+        _closed(ledger, LEDGER_REQUIRED, LEDGER_ALLOWED, "ledger")
+    if version not in {1, 2}:
+        raise HandoffError("E_HANDOFF_SCHEMA", "ledger.schema_version must be 1 or 2")
     for key in ("task_id", "milestone_id", "implementer", "reviewer", "implementation_invocation_id", "review_invocation_id", "status"):
         _string(ledger[key], f"ledger.{key}")
     _integer(ledger["milestone_index"], "ledger.milestone_index", 1)
@@ -169,6 +222,8 @@ def _ledger(value: Any) -> Mapping[str, Any]:
         _string(finding_id, "ledger.correction_review_counts key")
         if type(count) is not int or count < 0 or count > 2:
             raise HandoffError("E_HANDOFF_LIMIT", "no defect may receive more than two correction reviews")
+    if version == 2:
+        _runtime_bindings(ledger["runtime_bindings"])
     return ledger
 
 
@@ -305,6 +360,8 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
     implementation = _receipt(implementation_value, "implementation receipt")
     review = _receipt(review_value, "review receipt")
     ledger = _ledger(ledger_value)
+    if (config.policy.get("version") == 2) != (ledger["schema_version"] == 2):
+        raise HandoffError("E_HANDOFF_SCHEMA", "v2 policy requires v2 receipts and ledger; v1 is not silently reinterpreted")
     members = {member["name"]: member for member in config.policy["pair"]}
     names = list(members)
     first = config.policy["workflow"]["first_implementer"]
@@ -318,6 +375,28 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
         _same(receipt["resolved_orchestrator_profile"], ledger["resolved_orchestrator_profile"], f"{label}.resolved_orchestrator_profile")
         for key in ("task_id", "milestone_id", "milestone_index", "round", "worktree", "baseline", "path_scope"):
             _same(receipt[key], ledger[key], f"{label}.{key}")
+
+    if ledger["schema_version"] == 2:
+        bindings = _runtime_bindings(ledger["runtime_bindings"])
+        configured = {member["name"]: member for member in config.policy["pair"]}
+        control_plane = {
+            "technical_authority": config.policy["technical_authority"],
+            "orchestrator": config.policy["orchestrator"],
+            **{name: configured[name] for name in ("luna_worker", "claude_worker")},
+        }
+        for role, binding in bindings.items():
+            profile = binding["resolved_profile"]
+            requested = control_plane[role]
+            profile_keys = ("provider", "model", "reasoning_effort") if "reasoning_effort" in requested else ("provider", "model")
+            for key in profile_keys:
+                _same(profile[key], requested[key], f"runtime_bindings.{role}.resolved_profile.{key}")
+        for receipt, label in ((implementation, "implementation receipt"), (review, "review receipt")):
+            role = receipt["pair_member"]
+            binding = bindings[role]
+            for key in ("role_instance_id", "session_id", "host_id", "context_id", "resolved_profile"):
+                _same(receipt[key], binding[key], f"{label}.{key} versus runtime_bindings.{role}.{key}")
+        if ledger["resolved_orchestrator_profile"] != bindings["orchestrator"]["resolved_profile"]:
+            raise HandoffError("E_RUNTIME_BINDING", "resolved_orchestrator_profile must be Luna's resolved orchestrator profile")
 
     _same(ledger["policy_digest"], config.policy_digest, "ledger.policy_digest")
     _same(implementation["invocation_kind"], "implementation", "implementation receipt.invocation_kind")
@@ -359,6 +438,12 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
     _same(current_fingerprint, implementation["target_fingerprint_after"], "current worktree fingerprint versus implementation handoff")
     _same(current_fingerprint, review["target_fingerprint_before"], "current worktree fingerprint versus review before")
     _same(current_fingerprint, review["target_fingerprint_after"], "current worktree fingerprint versus review after")
+    if ledger["schema_version"] == 2:
+        full_fingerprint = git_worktree_fingerprint(ledger["worktree"], ["."])
+        _same(review["full_worktree_fingerprint_before"], implementation["full_worktree_fingerprint_after"], "review full-worktree fingerprint before")
+        _same(review["full_worktree_fingerprint_after"], review["full_worktree_fingerprint_before"], "review full-worktree fingerprint after")
+        _same(full_fingerprint, review["full_worktree_fingerprint_before"], "current full-worktree fingerprint versus review before")
+        _same(full_fingerprint, review["full_worktree_fingerprint_after"], "current full-worktree fingerprint versus review after")
 
 
 def _canonical(value: Mapping[str, Any]) -> str:

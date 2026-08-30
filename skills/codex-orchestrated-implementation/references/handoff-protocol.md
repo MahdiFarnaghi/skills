@@ -7,7 +7,10 @@ Safety-critical work.
 1. Terra resolves and records one execution profile before the first write:
    provider, model, reasoning effort, host/profile identity, resolution source,
    and profile digest. The resolved profile is runtime evidence, not a config
-   promise. Missing or contradictory confirmation is an escalation.
+   promise. Missing or contradictory confirmation is an escalation. Under v2,
+   the ledger also binds the separate Luna orchestrator profile and the two
+   named pair-worker profiles. Each of those four runtime bindings has
+   distinct role-instance, session, host, and context identities.
 2. Require an accessible Git worktree. This protocol has no non-Git mode:
    the baseline is a full `HEAD` object id and the helper verifies it against
    the named worktree.
@@ -27,7 +30,10 @@ Safety-critical work.
    baseline identity, exact path scope, and exact implementation fingerprint
    before reading. A mismatch is no verdict: stop and re-establish the handoff.
 6. Review is read-only. The reviewer records `target_fingerprint_before` and
-   `target_fingerprint_after`; they must be equal. A reviewer must not modify,
+   `target_fingerprint_after`; they must be equal. Under v2 it also records
+   `full_worktree_fingerprint_before` and `full_worktree_fingerprint_after`;
+   those must be equal and are recomputed over `.` so an out-of-scope reviewer
+   mutation cannot bypass the guard. A reviewer must not modify,
    stage, commit, delete, publish, or repair production files. Use `$cc:review`
    only when its environment is already bound to this exact frozen worktree;
    it cannot accept the path scope/worktree or emit the required receipt.

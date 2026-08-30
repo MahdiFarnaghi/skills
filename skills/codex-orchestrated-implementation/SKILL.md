@@ -5,10 +5,48 @@ description: Coordinate substantial or high-risk implementation work with a conf
 
 # Codex-Orchestrated Implementation
 
-Use Terra (or another explicitly confirmed Codex orchestrator) as the sole
-workflow and completion authority. Use exactly two equivalent pair members.
-Roles are derived per milestone; never configure one member permanently as
-implementer or reviewer.
+Use Terra as the sole technical authority and final acceptance authority. Luna
+is the execution orchestrator. The reciprocal pair is exactly
+`luna_worker`/`claude_worker`; roles are derived per milestone and alternate,
+so neither member is permanently an implementer or reviewer. Version 2 is the
+Phase 1/2 contract. Version 1 remains a legacy path with its original
+validation and semantics; it is never silently reinterpreted as v2.
+
+## Phase 1: control plane and immutable evidence
+
+V2 separates `[technical_authority]` (Terra) from `[orchestrator]` (Luna) and
+fixes the pair names and provider/model roles. Every v2 worker receipt and
+ledger binds the four runtime roles with distinct `role_instance_id`,
+`session_id`, `host_id`, and `context_id` values plus resolved execution
+profiles. Reusing any identity across Terra, the Luna orchestrator, the Luna
+worker, or the Claude worker is rejected. The technical-authority profile is
+evidence of the resolved runtime, not a prompt or TOML promise.
+
+Review remains read-only. In addition to the declared-scope fingerprint, v2
+reviews carry a full-worktree before/after fingerprint. Terra rejects any
+reviewer mutation outside the declared scope as well as inside it.
+
+The decision protocol in `scripts/decision_protocol.py` stores durable,
+append-only request and decision JSONL records. Records bind task, milestone,
+profiles, absolute worktree, exact scope, target fingerprint, and policy
+digest. Idempotency is canonical-content based; supersession appends a new
+request and cannot rewrite or decide an older request; an unavailable Terra
+may emit only an unavailable status, never a decision.
+
+## Phase 2: constrained Qwen assistant
+
+`qwen_local` is optional and disabled/read-only by default. The
+`QwenLocalAdapter` speaks only the allowlisted OpenAI-compatible local endpoint
+and `Qwen3.8-27B` model after a capability probe. TLS/auth, low/medium
+reasoning, timeout/retry, context/input/output budgets, and disabled
+tools/skills/inherited credentials are strict policy. Qwen output is always
+untrusted and has its own structured receipt; disabled, out-of-policy, and
+unprobed dispatches fail with stable rejection codes.
+
+Qwen cannot write the active worktree. The only mechanical-write path is an
+explicitly enabled isolated `draft_patch` gate with a Terra `accept` decision,
+passing integration tests, adoption by one pair worker, and read-only review
+by the opposite pair worker. Missing any gate is a rejection.
 
 ## Start safely
 

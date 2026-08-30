@@ -16,44 +16,60 @@ invalid `first_implementer`, role declarations, and provider/model mismatches.
 It prints a canonical policy digest for receipts. A failed validation is a
 hard stop; it does not fall back to defaults.
 
-The closed schema is:
+Version 1 remains accepted with its original semantics. A v1 policy has one
+requested orchestrator and two equivalent, role-less pair members; roles are
+derived from `first_implementer`. It is not silently upgraded to v2.
+
+The v2 closed schema is:
 
 ```toml
-version = 1
+version = 2
 
-[orchestrator]
+[technical_authority]
 provider = "codex"
 model = "gpt-5.6-terra"
 reasoning_effort = "high"
 
+[orchestrator]
+provider = "codex"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+
 [[pair]]
-name = "worker_a"
-provider = "claude_code"
-model = "opus"
+name = "luna_worker"
+provider = "codex"
+model = "gpt-5.6-luna"
 enabled = true
 
 [[pair]]
-name = "worker_b"
-provider = "codex"
-model = "gpt-5.6-luna"
+name = "claude_worker"
+provider = "claude_code"
+model = "opus"
 enabled = true
 
 [workflow]
 profile = "standard"
 pairing_mode = "alternating"
-first_implementer = "worker_a"
+first_implementer = "luna_worker"
 ```
 
-There must be exactly two enabled `[[pair]]` tables. Members are equivalent
-pair members; neither has a configured role. With `alternating`, the named
-`first_implementer` writes milestone 1, and the other member reviews it; the
-writer/reviewer roles swap for every substantive milestone. The only supported
-pairing mode is `alternating`. A `codex` model must be a syntactically valid
-lowercase `gpt-*` identifier; current host compatibility is confirmed at
-runtime with the resolved execution profile, not by a stale local catalog.
-`claude_code` accepts the companion's `fable`, `opus`, `sonnet`, and `haiku`
-aliases. Claude Code may still reject an alias unavailable to the signed-in
-account.
+V2 requires exactly `luna_worker` and `claude_worker`, both enabled. Terra is
+the only technical authority and final acceptance authority. Luna is the
+execution orchestrator. The two named workers alternate implementation and
+read-only review by substantive milestone; neither may be configured as a
+permanent role. V2 enforces `-terra` and `-luna` model suffixes for the two
+control-plane roles. The current host still confirms runtime compatibility.
+
+`[qwen_local]` is optional; when omitted it resolves to disabled. If present,
+all fields are required and validated. Its endpoint and model must be in their
+allowlists, TLS/auth policy must be explicit, budgets must fit, reasoning is
+limited to low/medium, and tools, skills, inherited credentials, and writes
+are disabled. `write_mode = "draft_patch"` only permits a separately gated,
+isolated draft path; it never grants direct worktree authority.
+
+For v1, there must be exactly two enabled `[[pair]]` tables. Members remain
+equivalent role-less pair members and all original provider/model and
+alternation semantics remain unchanged.
 
 The `[orchestrator]` block is a requested policy, not proof that the current
 orchestrator is Terra. Before the first write, resolve the actual host
