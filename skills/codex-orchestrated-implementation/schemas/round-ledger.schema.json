@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orchestrated milestone ledger entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "task_id", "milestone_id", "milestone_index", "round", "round_kind",
+    "invocation_count", "max_invocations", "max_correction_rounds",
+    "max_correction_reviews_per_defect", "worktree", "baseline",
+    "path_scope", "implementation_target_fingerprint", "review_target_fingerprint_before",
+    "review_target_fingerprint_after", "policy_digest", "resolved_orchestrator_profile",
+    "implementer", "reviewer", "implementation_invocation_id", "review_invocation_id",
+    "correction_review_counts", "status"
+  ],
+  "$defs": {
+    "execution_profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "model", "reasoning_effort", "host_identity", "resolution_source", "profile_digest"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"type": "string", "minLength": 1},
+        "host_identity": {"type": "string", "minLength": 1},
+        "resolution_source": {"type": "string", "minLength": 1},
+        "profile_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1},
+    "round": {"type": "integer", "minimum": 0},
+    "round_kind": {"enum": ["initial", "correction"]},
+    "invocation_count": {"type": "integer", "minimum": 0, "maximum": 8},
+    "max_invocations": {"const": 8},
+    "max_correction_rounds": {"const": 4},
+    "max_correction_reviews_per_defect": {"const": 2},
+    "worktree": {"type": "string", "pattern": "^/"},
+    "baseline": {"type": "object", "additionalProperties": false, "required": ["head_commit", "dirty_state_fingerprint"], "properties": {"head_commit": {"type": "string", "minLength": 40}, "dirty_state_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "path_scope": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "implementation_target_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "review_target_fingerprint_before": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "review_target_fingerprint_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resolved_orchestrator_profile": {"$ref": "#/$defs/execution_profile"},
+    "implementer": {"type": "string", "minLength": 1},
+    "reviewer": {"type": "string", "minLength": 1},
+    "implementation_invocation_id": {"type": "string", "minLength": 1},
+    "review_invocation_id": {"type": "string", "minLength": 1},
+    "correction_review_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 2}},
+    "status": {"enum": ["open", "reviewed", "needs_correction", "accepted", "escalated"]},
+    "finding_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  }
+}

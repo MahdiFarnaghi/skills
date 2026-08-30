@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orchestrated worker receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "task_id", "milestone_id", "milestone_index", "round", "invocation_id",
+    "invocation_kind", "pair_member", "provider", "model", "role",
+    "worktree", "baseline", "path_scope", "target_fingerprint_before",
+    "target_fingerprint_after", "read_only", "policy_digest", "resolved_orchestrator_profile",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1},
+    "round": {"type": "integer", "minimum": 0},
+    "invocation_id": {"type": "string", "minLength": 1},
+    "invocation_kind": {"enum": ["implementation", "review"]},
+    "pair_member": {"type": "string", "minLength": 1},
+    "provider": {"enum": ["codex", "claude_code"]},
+    "model": {"type": "string", "minLength": 1},
+    "role": {"enum": ["implementer", "reviewer"]},
+    "worktree": {"type": "string", "pattern": "^/"},
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["head_commit", "dirty_state_fingerprint"],
+      "properties": {
+        "head_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "dirty_state_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "path_scope": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "target_fingerprint_before": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "target_fingerprint_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "read_only": {"type": "boolean"},
+    "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resolved_orchestrator_profile": {"$ref": "round-ledger.schema.json#/$defs/execution_profile"},
+    "files_changed": {"type": "array", "items": {"type": "string"}},
+    "files_inspected": {"type": "array", "items": {"type": "string"}},
+    "commands": {"type": "array", "items": {"type": "string"}},
+    "failures": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+    "findings": {"type": "array", "items": {"type": "string"}},
+    "next_action": {"type": "string"},
+    "outcome": {"enum": ["success", "failure", "transport_failure", "needs_correction", "approve", "escalate"]}
+  }
+}
