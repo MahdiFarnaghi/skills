@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Terra-approved worker failover transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "transition_id", "idempotency_key", "task_id", "milestone_id", "milestone_index", "failed_role", "replacement_role", "transition_kind", "failure_reason", "failed_invocation_id", "terra_decision_id", "approved_by", "replacement_role_instance_id", "replacement_session_id", "replacement_context_id", "path_scope", "target_fingerprint", "status"],
+  "properties": {
+    "schema_version": {"const": 2}, "record_type": {"const": "role_transition"},
+    "transition_id": {"type": "string", "minLength": 1}, "idempotency_key": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1}, "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1}, "failed_role": {"const": "claude_worker"},
+    "replacement_role": {"const": "luna_worker"}, "transition_kind": {"enum": ["reviewer_fallback", "implementation_takeover"]},
+    "failure_reason": {"enum": ["quota_exhausted", "transport_failure", "authentication_failure", "timeout", "tool_failure"]},
+    "failed_invocation_id": {"type": "string", "minLength": 1}, "terra_decision_id": {"type": "string", "minLength": 1},
+    "approved_by": {"const": "terra"}, "replacement_role_instance_id": {"type": "string", "minLength": 1},
+    "replacement_session_id": {"type": "string", "minLength": 1}, "replacement_context_id": {"type": "string", "minLength": 1},
+    "path_scope": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+    "target_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "status": {"const": "approved"}
+  }
+}

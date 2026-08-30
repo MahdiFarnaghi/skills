@@ -74,15 +74,23 @@ def pre_dispatch(resolved_or_policy: Any, *, prompt: str, write_requested: bool 
         validate_write_gate(qwen, write_gate)
 
 
+def build_headers(qwen: Mapping[str, Any]) -> dict[str, str]:
+    """Build headers using an environment-only bearer token."""
+
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if qwen["auth_mode"] == "explicit_env":
+        token_env = qwen["auth_token_env"]
+        token = os.environ.get(token_env)
+        if not token:
+            raise QwenError("E_QWEN_AUTH_UNAVAILABLE", f"bearer-token environment variable {token_env!r} is unavailable")
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
 def _request(qwen: Mapping[str, Any], path: str, method: str = "GET", payload: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
     endpoint = str(qwen["endpoint"]).rstrip("/")
     url = endpoint + path
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    if qwen["auth_mode"] == "explicit_env":
-        token = os.environ.get(qwen["auth_token_env"])
-        if not token:
-            raise QwenError("E_QWEN_AUTH_UNAVAILABLE", "the explicitly configured Qwen token is unavailable")
-        headers["Authorization"] = "Bearer " + token
+    headers = build_headers(qwen)
     request = urllib.request.Request(url, method=method, headers=headers, data=json.dumps(payload).encode() if payload is not None else None)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:

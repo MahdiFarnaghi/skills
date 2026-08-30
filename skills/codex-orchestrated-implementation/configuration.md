@@ -9,6 +9,11 @@ validate it:
 python3 <skill-root>/scripts/validate_config.py --config <project-root>/.codex-orchestration.toml
 ```
 
+The project-local policy should be listed in the target repository’s
+`.gitignore` (the exact entry is `.codex-orchestration.toml`). The example
+template is safe to distribute, but the resolved policy is environment-specific
+and may reference local endpoints or authentication settings.
+
 The validator is the enforcement point. It parses TOML with Python's strict
 `tomllib` parser and rejects malformed TOML, unknown keys, missing fields,
 duplicate member names, disabled or extra members, unsupported pairing modes,
@@ -64,7 +69,10 @@ control-plane roles. The current host still confirms runtime compatibility.
 all fields are required and validated. Its endpoint and model must be in their
 allowlists, TLS/auth policy must be explicit, budgets must fit, reasoning is
 limited to low/medium, and tools, skills, inherited credentials, and writes
-are disabled. `write_mode = "draft_patch"` only permits a separately gated,
+are disabled. When `auth_mode = "explicit_env"`, `auth_token_env` names an
+uppercase environment variable containing the bearer token; the conventional
+value is `LLM_BEARER_TOKEN`. The secret is never placed in TOML, receipts, or
+logs. `write_mode = "draft_patch"` only permits a separately gated,
 isolated draft path; it never grants direct worktree authority.
 
 For v1, there must be exactly two enabled `[[pair]]` tables. Members remain
@@ -77,3 +85,8 @@ execution profile (provider, model, reasoning effort, host/profile identity,
 and resolution source). Record that immutable profile in every ledger and
 receipt. If the host cannot confirm it, stop and escalate; a prompt or TOML
 value cannot switch the current orchestrator.
+
+V2 failover is disabled unless `[failover]` explicitly enables it. Even when
+enabled, `require_terra_approval` must remain true and fallback is limited to a
+distinct Luna worker execution. Quota exhaustion produces no verdict; the
+transition must be recorded and bound to the frozen scope and Terra decision.

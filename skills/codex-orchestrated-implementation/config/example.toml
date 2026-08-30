@@ -27,6 +27,13 @@ profile = "standard"
 pairing_mode = "alternating"
 first_implementer = "luna_worker"
 
+[failover]
+enabled = true
+allow_luna_worker_fallback = true
+require_terra_approval = true
+fallback_reviewer = "luna_worker"
+max_fallback_rounds = 1
+
 [qwen_local]
 enabled = false
 endpoint = "https://127.0.0.1:8000/v1"
@@ -34,8 +41,10 @@ allowed_endpoints = ["https://127.0.0.1:8000/v1"]
 model = "Qwen3.8-27B"
 allowed_models = ["Qwen3.8-27B"]
 tls_policy = "required"
-auth_mode = "none"
-auth_token_env = ""
+# Set auth_mode = "none" if the local server does not require authentication.
+# Otherwise the token is read from this environment variable, never this file.
+auth_mode = "explicit_env"
+auth_token_env = "LLM_BEARER_TOKEN"
 max_context_tokens = 4096
 max_input_tokens = 2048
 max_output_tokens = 1024

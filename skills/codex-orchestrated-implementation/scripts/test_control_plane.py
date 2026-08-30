@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from decision_protocol import DecisionError, append_decision_records  # noqa: E402
-from qwen_local import QwenError, make_receipt, pre_dispatch, validate_write_gate  # noqa: E402
+from qwen_local import QwenError, build_headers, make_receipt, pre_dispatch, validate_write_gate  # noqa: E402
 from validate_config import load_config  # noqa: E402
 
 
@@ -38,6 +38,18 @@ def test_qwen_is_fail_closed_and_receipt_is_untrusted() -> None:
     assert receipt["untrusted"] is True
     assert hashlib.sha256(b"x").hexdigest() == receipt["request_digest"]
     assert digest != receipt["request_digest"]
+
+
+def test_qwen_bearer_token_is_environment_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    resolved = load_config(ROOT / "config" / "example.toml")
+    qwen = resolved.policy["qwen_local"]
+    monkeypatch.delenv("LLM_BEARER_TOKEN", raising=False)
+    with pytest.raises(QwenError) as error:
+        build_headers(qwen)
+    assert error.value.code == "E_QWEN_AUTH_UNAVAILABLE"
+    monkeypatch.setenv("LLM_BEARER_TOKEN", "test-secret-token")
+    assert build_headers(qwen)["Authorization"] == "Bearer test-secret-token"
+    assert "test-secret-token" not in str(resolved.policy)
 
 
 def test_qwen_write_gate_requires_terra_and_pair_review() -> None:

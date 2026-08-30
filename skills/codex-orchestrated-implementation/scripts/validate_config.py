@@ -30,7 +30,7 @@ PROVIDERS = frozenset({"codex", "claude_code"})
 QWEN_PROVIDER = "qwen_local"
 
 TOP_LEVEL_KEYS = frozenset({"version", "orchestrator", "pair", "workflow"})
-V2_TOP_LEVEL_KEYS = frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow", "qwen_local"})
+V2_TOP_LEVEL_KEYS = frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow", "qwen_local", "failover"})
 ORCHESTRATOR_KEYS = frozenset({"provider", "model", "reasoning_effort"})
 V2_CONTROL_PLANE_KEYS = frozenset({"provider", "model", "reasoning_effort"})
 PAIR_KEYS = frozenset({"name", "provider", "model", "enabled"})
@@ -45,6 +45,7 @@ QWEN_REASONING_EFFORTS = frozenset({"low", "medium"})
 QWEN_TLS_POLICIES = frozenset({"required", "localhost_insecure"})
 QWEN_AUTH_MODES = frozenset({"none", "explicit_env"})
 QWEN_WRITE_MODES = frozenset({"disabled", "draft_patch"})
+FAILOVER_KEYS = frozenset({"enabled", "allow_luna_worker_fallback", "require_terra_approval", "fallback_reviewer", "max_fallback_rounds"})
 
 
 class ConfigError(ValueError):
@@ -179,6 +180,20 @@ def _validate_v2_qwen(qwen: Mapping[str, Any]) -> None:
         raise ConfigError("E_QWEN_WRITE_POLICY", "disabled Qwen assistant must have write_mode=disabled")
 
 
+def _validate_v2_failover(failover: Mapping[str, Any]) -> None:
+    _closed_keys(failover, FAILOVER_KEYS, "failover")
+    _required(failover, FAILOVER_KEYS, "failover")
+    for key in ("enabled", "allow_luna_worker_fallback", "require_terra_approval"):
+        if type(failover[key]) is not bool:
+            raise ConfigError("E_FAILOVER_CONFIG", f"failover.{key} must be boolean")
+    if failover["fallback_reviewer"] != "luna_worker":
+        raise ConfigError("E_FAILOVER_ROLE", "failover.fallback_reviewer must be luna_worker")
+    if type(failover["max_fallback_rounds"]) is not int or not 0 <= failover["max_fallback_rounds"] <= 1:
+        raise ConfigError("E_FAILOVER_LIMIT", "failover.max_fallback_rounds must be 0 or 1")
+    if failover["allow_luna_worker_fallback"] and not failover["require_terra_approval"]:
+        raise ConfigError("E_FAILOVER_AUTHORITY", "Luna fallback always requires Terra approval")
+
+
 def _validate_v2(root: Mapping[str, Any]) -> dict[str, Any]:
     _closed_keys(root, V2_TOP_LEVEL_KEYS, "root")
     _required(root, frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow"}), "root")
@@ -237,10 +252,15 @@ def _validate_v2(root: Mapping[str, Any]) -> dict[str, Any]:
         root = dict(root)
         root["qwen_local"] = {
             "enabled": False, "endpoint": "https://127.0.0.1:8000/v1", "allowed_endpoints": ["https://127.0.0.1:8000/v1"],
-            "model": "Qwen3.8-27B", "allowed_models": ["Qwen3.8-27B"], "tls_policy": "required", "auth_mode": "none", "auth_token_env": "",
+            "model": "Qwen3.8-27B", "allowed_models": ["Qwen3.8-27B"], "tls_policy": "required", "auth_mode": "explicit_env", "auth_token_env": "LLM_BEARER_TOKEN",
             "max_context_tokens": 4096, "max_input_tokens": 2048, "max_output_tokens": 1024, "reasoning_effort": "low", "timeout_seconds": 20, "max_retries": 0,
             "tools": False, "skills": False, "inherit_credentials": False, "write_mode": "disabled",
         }
+    if "failover" in root:
+        _validate_v2_failover(_mapping(root["failover"], "failover"))
+    else:
+        root = dict(root)
+        root["failover"] = {"enabled": False, "allow_luna_worker_fallback": False, "require_terra_approval": True, "fallback_reviewer": "luna_worker", "max_fallback_rounds": 0}
     return dict(root)
 
 

@@ -42,7 +42,14 @@ The target must be a Git repository with a project-level
 policy uses Terra as technical authority, Luna as orchestrator, and alternating
 Luna/Claude workers. It also supports an optional constrained Qwen3.8-27B local
 assistant for bounded read-only tasks; Qwen is never an authority, reviewer, or
-completion agent.
+completion agent. If the local server requires authentication, set
+`auth_mode = "explicit_env"` and `auth_token_env = "LLM_BEARER_TOKEN"`; export
+that environment variable at runtime. Never put the bearer token in the project
+configuration.
+
+The orchestration skill also supports Terra-approved Claude failover. A Claude
+quota or transport failure is recorded without a verdict; Luna can continue
+only with a distinct worker session and independent review context.
 
 ## Installation
 
@@ -99,12 +106,15 @@ provided example and validate it:
 ```sh
 cp ~/.codex/skills/codex-orchestrated-implementation/config/example.toml \
    .codex-orchestration.toml
+printf '%s\n' '.codex-orchestration.toml' >> .gitignore
 python3 ~/.codex/skills/codex-orchestrated-implementation/scripts/validate_config.py \
    --config .codex-orchestration.toml
 ```
 
 Review the worker pair, model choices, `first_implementer`, and workflow profile
-with the developer before using the skill on a project.
+with the developer before using the skill on a project. Keep the generated
+project policy local and untracked; the skill’s `config/example.toml` remains
+the shareable template.
 
 For `codex-reviewed-implementation`, follow the model-policy and Codex CLI
 preflight/doctor instructions in its references before starting a reviewed

@@ -15,5 +15,9 @@ __pycache__/
 *.swp
 *.swo
 
+# Project-local orchestration policy may contain environment-specific settings.
+# Keep the distributable template at skills/*/config/example.toml tracked.
+.codex-orchestration.toml
+
 # macOS
 .DS_Store

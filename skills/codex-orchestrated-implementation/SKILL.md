@@ -37,11 +37,22 @@ may emit only an unavailable status, never a decision.
 
 `qwen_local` is optional and disabled/read-only by default. The
 `QwenLocalAdapter` speaks only the allowlisted OpenAI-compatible local endpoint
-and `Qwen3.8-27B` model after a capability probe. TLS/auth, low/medium
+and `Qwen3.8-27B` model after a capability probe. TLS/auth—including an
+optional bearer token from an explicitly named environment variable such as
+`LLM_BEARER_TOKEN`—low/medium
 reasoning, timeout/retry, context/input/output budgets, and disabled
 tools/skills/inherited credentials are strict policy. Qwen output is always
 untrusted and has its own structured receipt; disabled, out-of-policy, and
 unprobed dispatches fail with stable rejection codes.
+
+## Worker failover
+
+Claude quota exhaustion is a failed invocation, not a review verdict. Luna may
+continue bounded approved work, but may not self-review the same snapshot. A
+Claude-to-Luna fallback requires a distinct Luna worker instance, session, and
+context plus an append-only Terra decision and validated `scripts/failover.py`
+record. Claude implementation ownership cannot transfer silently. If no
+independent reviewer is available, pause and escalate.
 
 Qwen cannot write the active worktree. The only mechanical-write path is an
 explicitly enabled isolated `draft_patch` gate with a Terra `accept` decision,
