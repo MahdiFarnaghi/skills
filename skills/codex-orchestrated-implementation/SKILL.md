@@ -134,8 +134,8 @@ implementation invocation plus one review invocation over one frozen snapshot.
 A correction round is one invocation by the original implementer plus one
 re-review over the new snapshot. A failed invocation produces no verdict and
 does not complete a round; retrying consumes another invocation and does not
-change ownership. Stop and escalate at two correction reviews for one defect,
-four correction rounds, or eight total invocations per milestone. See the
+change ownership. Stop and escalate at three correction reviews for one defect,
+20 correction rounds, or eight total invocations per milestone. See the
 handoff reference for Lightweight exemptions; none remove single-writer,
 read-only-review, profile-confirmation, receipt, fingerprint, or accounting
 requirements.

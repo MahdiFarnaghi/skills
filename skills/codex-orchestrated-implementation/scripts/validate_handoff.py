@@ -207,8 +207,8 @@ def _ledger(value: Any) -> Mapping[str, Any]:
     if ledger["round_kind"] not in {"initial", "correction"}:
         raise HandoffError("E_HANDOFF_SCHEMA", "ledger.round_kind must be initial or correction")
     _integer(ledger["invocation_count"], "ledger.invocation_count", 0)
-    if ledger["max_invocations"] != 8 or ledger["max_correction_rounds"] != 4 or ledger["max_correction_reviews_per_defect"] != 2:
-        raise HandoffError("E_HANDOFF_LIMIT", "ledger must retain limits 8 invocations, 4 correction rounds, and 2 reviews per defect")
+    if ledger["max_invocations"] != 8 or ledger["max_correction_rounds"] != 20 or ledger["max_correction_reviews_per_defect"] != 3:
+        raise HandoffError("E_HANDOFF_LIMIT", "ledger must retain limits 8 invocations, 20 correction rounds, and 3 reviews per defect")
     worktree = _string(ledger["worktree"], "ledger.worktree")
     if not Path(worktree).is_absolute():
         raise HandoffError("E_HANDOFF_SCHEMA", "ledger.worktree must be absolute")
@@ -220,8 +220,8 @@ def _ledger(value: Any) -> Mapping[str, Any]:
     counts = _mapping(ledger["correction_review_counts"], "ledger.correction_review_counts")
     for finding_id, count in counts.items():
         _string(finding_id, "ledger.correction_review_counts key")
-        if type(count) is not int or count < 0 or count > 2:
-            raise HandoffError("E_HANDOFF_LIMIT", "no defect may receive more than two correction reviews")
+        if type(count) is not int or count < 0 or count > 3:
+            raise HandoffError("E_HANDOFF_LIMIT", "no defect may receive more than three correction reviews")
     if version == 2:
         _runtime_bindings(ledger["runtime_bindings"])
     return ledger
@@ -429,7 +429,7 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
     _same(ledger["review_target_fingerprint_after"], review["target_fingerprint_after"], "ledger review fingerprint after")
     if (ledger["round"] == 0) != (ledger["round_kind"] == "initial"):
         raise HandoffError("E_HANDOFF_LIMIT", "round 0 must be initial; later rounds must be correction")
-    if ledger["round"] > 4 or ledger["invocation_count"] > 8:
+    if ledger["round"] > 20 or ledger["invocation_count"] > 8:
         raise HandoffError("E_HANDOFF_LIMIT", "milestone correction-round or invocation limit exceeded")
     if ledger["invocation_count"] < (ledger["round"] + 1) * 2:
         raise HandoffError("E_HANDOFF_LIMIT", "ledger invocation_count omits a completed pair round")
