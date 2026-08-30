@@ -74,6 +74,21 @@ for implementation and review. In particular, it uses `$cc:rescue` for Claude
 implementation and `$cc:review` only for read-only review when the environment
 is already bound to the frozen worktree.
 
+### skills.sh
+
+Once this collection is published in a public GitHub repository, install its
+skills through the [skills.sh](https://www.skills.sh/) CLI:
+
+```sh
+npx skills add <owner>/<repo>
+```
+
+Replace `<owner>/<repo>` with the GitHub repository containing this collection.
+The CLI makes the repository’s skills available to the supported agent tools;
+see the [skills.sh documentation](https://www.skills.sh/docs) for current CLI
+behavior. Review a skill’s files before installing, especially skills that can
+edit code or run commands.
+
 ## Project setup
 
 For `codex-orchestrated-implementation`, create the project policy from the
