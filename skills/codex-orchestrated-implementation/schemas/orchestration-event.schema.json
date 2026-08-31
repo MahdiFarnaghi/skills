@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Durable orchestration event",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["event_id", "type", "task_id", "milestone_id"],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "type": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "milestone_id": {"type": "string", "minLength": 1}
+  }
+}

@@ -27,6 +27,23 @@ profile = "standard"
 pairing_mode = "alternating"
 first_implementer = "luna_worker"
 
+[continuation]
+progress_timeout_seconds = 600
+implementation_timeout_seconds = 3600
+review_timeout_seconds = 2400
+max_transport_retries = 4
+max_worker_retries = 2
+poll_interval_seconds = 60
+receipt_recovery_retries = 1
+max_failed_invocations = 6
+require_durable_wakeup = true
+
+[limits]
+max_correction_rounds = 20
+max_correction_reviews_per_defect = 3
+max_invocations = 48
+max_failed_invocations = 6
+
 [failover]
 enabled = true
 allow_luna_worker_fallback = true

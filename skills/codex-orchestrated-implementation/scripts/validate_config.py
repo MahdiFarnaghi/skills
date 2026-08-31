@@ -30,7 +30,7 @@ PROVIDERS = frozenset({"codex", "claude_code"})
 QWEN_PROVIDER = "qwen_local"
 
 TOP_LEVEL_KEYS = frozenset({"version", "orchestrator", "pair", "workflow"})
-V2_TOP_LEVEL_KEYS = frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow", "qwen_local", "failover"})
+V2_TOP_LEVEL_KEYS = frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow", "qwen_local", "failover", "continuation", "limits"})
 ORCHESTRATOR_KEYS = frozenset({"provider", "model", "reasoning_effort"})
 V2_CONTROL_PLANE_KEYS = frozenset({"provider", "model", "reasoning_effort"})
 PAIR_KEYS = frozenset({"name", "provider", "model", "enabled"})
@@ -46,6 +46,8 @@ QWEN_TLS_POLICIES = frozenset({"required", "localhost_insecure"})
 QWEN_AUTH_MODES = frozenset({"none", "explicit_env"})
 QWEN_WRITE_MODES = frozenset({"disabled", "draft_patch"})
 FAILOVER_KEYS = frozenset({"enabled", "allow_luna_worker_fallback", "require_terra_approval", "fallback_reviewer", "max_fallback_rounds"})
+CONTINUATION_KEYS = frozenset({"poll_interval_seconds", "progress_timeout_seconds", "implementation_timeout_seconds", "review_timeout_seconds", "max_transport_retries", "max_worker_retries", "receipt_recovery_retries", "max_failed_invocations", "require_durable_wakeup"})
+LIMIT_KEYS = frozenset({"max_correction_rounds", "max_correction_reviews_per_defect", "max_invocations", "max_failed_invocations"})
 
 
 class ConfigError(ValueError):
@@ -194,6 +196,40 @@ def _validate_v2_failover(failover: Mapping[str, Any]) -> None:
         raise ConfigError("E_FAILOVER_AUTHORITY", "Luna fallback always requires Terra approval")
 
 
+def _validate_v2_continuation(continuation: Mapping[str, Any], limits: Mapping[str, Any]) -> None:
+    _closed_keys(continuation, CONTINUATION_KEYS, "continuation")
+    _required(continuation, CONTINUATION_KEYS, "continuation")
+    _closed_keys(limits, LIMIT_KEYS, "limits")
+    _required(limits, LIMIT_KEYS, "limits")
+    integer_ranges = {
+        "poll_interval_seconds": (1, 60), "progress_timeout_seconds": (1, 86400),
+        "implementation_timeout_seconds": (1, 86400), "review_timeout_seconds": (1, 86400),
+        "max_transport_retries": (0, 10), "max_worker_retries": (0, 10),
+        "receipt_recovery_retries": (0, 3), "max_failed_invocations": (0, 48),
+    }
+    for key, (minimum, maximum) in integer_ranges.items():
+        value = continuation[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigError("E_CONTINUATION_CONFIG", f"continuation.{key} must be an integer in [{minimum}, {maximum}]")
+    if continuation["progress_timeout_seconds"] < continuation["poll_interval_seconds"]:
+        raise ConfigError("E_CONTINUATION_CONFIG", "progress timeout must be at least the poll interval")
+    if type(continuation["require_durable_wakeup"]) is not bool:
+        raise ConfigError("E_CONTINUATION_CONFIG", "continuation.require_durable_wakeup must be boolean")
+    expected_limits = {
+        "max_correction_rounds": (20, 20), "max_correction_reviews_per_defect": (3, 3),
+        "max_invocations": (42, 256), "max_failed_invocations": (0, 48),
+    }
+    for key, (minimum, maximum) in expected_limits.items():
+        value = limits[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigError("E_LIMIT_CONFIG", f"limits.{key} must be an integer in [{minimum}, {maximum}]")
+    if limits["max_failed_invocations"] != continuation["max_failed_invocations"]:
+        raise ConfigError("E_LIMIT_CONFIG", "limits.max_failed_invocations must equal continuation.max_failed_invocations")
+    minimum_successful = 2 * (1 + limits["max_correction_rounds"])
+    if limits["max_invocations"] < minimum_successful + limits["max_failed_invocations"]:
+        raise ConfigError("E_LIMIT_CONFIG", "max_invocations must cover the initial pair, correction rounds, and failed-invocation budget")
+
+
 def _validate_v2(root: Mapping[str, Any]) -> dict[str, Any]:
     _closed_keys(root, V2_TOP_LEVEL_KEYS, "root")
     _required(root, frozenset({"version", "technical_authority", "orchestrator", "pair", "workflow"}), "root")
@@ -246,6 +282,9 @@ def _validate_v2(root: Mapping[str, Any]) -> dict[str, Any]:
         raise ConfigError("E_PAIRING_MODE", "v2 pairing_mode must be alternating")
     if _string(workflow["first_implementer"], "workflow.first_implementer") not in names:
         raise ConfigError("E_FIRST_IMPLEMENTER", "first_implementer must name a v2 pair member")
+    continuation = _mapping(root.get("continuation"), "continuation")
+    limits = _mapping(root.get("limits"), "limits")
+    _validate_v2_continuation(continuation, limits)
     if "qwen_local" in root:
         _validate_v2_qwen(_mapping(root["qwen_local"], "qwen_local"))
     else:

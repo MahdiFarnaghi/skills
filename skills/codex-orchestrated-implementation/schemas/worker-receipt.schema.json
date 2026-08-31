@@ -44,6 +44,13 @@
     "host_id": {"type": "string", "minLength": 1},
     "context_id": {"type": "string", "minLength": 1},
     "resolved_profile": {"$ref": "round-ledger.schema.json#/$defs/execution_profile"},
+    "capability_preflight": {"type": "object", "additionalProperties": false, "properties": {
+      "exact_snapshot_access": {"type": "boolean"}, "repository_inspection": {"type": "boolean"},
+      "shell_execution": {"type": "boolean"}, "test_execution": {"type": "boolean"}, "crg_checks": {"type": "boolean"}
+    }, "required": ["exact_snapshot_access", "repository_inspection", "shell_execution", "test_execution", "crg_checks"]},
+    "checks_performed": {"type": "array", "items": {"type": "string"}},
+    "checks_supplied_by_orchestrator": {"type": "array", "items": {"type": "string"}},
+    "checks_unavailable": {"type": "array", "items": {"type": "string"}},
     "files_changed": {"type": "array", "items": {"type": "string"}},
     "files_inspected": {"type": "array", "items": {"type": "string"}},
     "commands": {"type": "array", "items": {"type": "string"}},

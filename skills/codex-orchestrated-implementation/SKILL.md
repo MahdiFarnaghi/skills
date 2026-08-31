@@ -128,6 +128,13 @@ member re-review it.
 
 ## Accounting and completion
 
+After the first worker dispatch, keep the task active until `complete`,
+`blocked`, `escalated`, or `cancelled`. Use the durable state machine and
+host-native bounded waits described in [continuous-orchestration.md](references/continuous-orchestration.md);
+do not emit a final response while a worker is active or an automatic next
+action is available. A completed receipt must immediately be validated and
+routed to review, correction, verification, or Terra as applicable.
+
 An invocation is every attempted worker execution, including setup,
 transport, authentication, and timeout failures. An initial round is one
 implementation invocation plus one review invocation over one frozen snapshot.
@@ -135,7 +142,8 @@ A correction round is one invocation by the original implementer plus one
 re-review over the new snapshot. A failed invocation produces no verdict and
 does not complete a round; retrying consumes another invocation and does not
 change ownership. Stop and escalate at three correction reviews for one defect,
-20 correction rounds, or eight total invocations per milestone. See the
+20 correction rounds, or 48 total invocations per milestone, including up to
+6 failed invocations. See the
 handoff reference for Lightweight exemptions; none remove single-writer,
 read-only-review, profile-confirmation, receipt, fingerprint, or accounting
 requirements.

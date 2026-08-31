@@ -90,3 +90,13 @@ V2 failover is disabled unless `[failover]` explicitly enables it. Even when
 enabled, `require_terra_approval` must remain true and fallback is limited to a
 distinct Luna worker execution. Quota exhaustion produces no verdict; the
 transition must be recorded and bound to the frozen scope and Terra decision.
+
+V2 also requires `[continuation]` and `[limits]`. Continuation controls are
+bounded: polling is at most 60 seconds, progress timeout is at least the poll
+interval, and implementation/review/retry budgets are finite. The shipped
+policy uses 60-second polling, 600-second progress timeout, 3600-second
+implementation timeout, 2400-second review timeout, four transport retries,
+and two worker retries. Limits are 20 correction rounds, three reviews per
+defect, 48 total worker invocations, and six failed invocations. The total
+invocation limit must cover the initial pair, all configured correction rounds,
+and the failed-invocation budget.

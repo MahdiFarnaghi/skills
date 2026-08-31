@@ -87,7 +87,7 @@ a round; retrying it consumes another invocation and keeps the same owner and
 role.
 
 Per milestone, stop and escalate at the first applicable limit: three correction
-reviews for one defect, 20 correction rounds, or eight total invocations
+reviews for one defect, 20 correction rounds, or 48 total invocations
 (including failed attempts and the initial pair). A worker/transport failure
 never silently changes ownership. Re-plan with Terra before any reassignment;
 if the original implementer is unavailable, the milestone remains incomplete.

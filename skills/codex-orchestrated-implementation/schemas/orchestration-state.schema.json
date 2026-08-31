@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Durable orchestration state",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "task_id", "milestone_id", "milestone_index", "state", "round", "limits", "invocation_count", "failed_invocations", "correction_reviews", "next_action"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1},
+    "state": {"type": "string", "minLength": 1},
+    "round": {"type": "integer", "minimum": 0, "maximum": 20},
+    "invocation_count": {"type": "integer", "minimum": 0, "maximum": 48},
+    "failed_invocations": {"type": "integer", "minimum": 0, "maximum": 6},
+    "correction_reviews": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 3}},
+    "limits": {"type": "object", "required": ["max_correction_rounds", "max_correction_reviews_per_defect", "max_invocations", "max_failed_invocations"]},
+    "next_action": {"type": ["object", "null"]}
+  }
+}

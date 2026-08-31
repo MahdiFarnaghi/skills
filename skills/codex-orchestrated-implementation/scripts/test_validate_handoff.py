@@ -93,7 +93,7 @@ def records(tmp_path: Path, *, milestone_index: int = 1, scope: list[str] | None
         **common,
         "round_kind": "initial",
         "invocation_count": 2,
-        "max_invocations": 8,
+        "max_invocations": 48,
         "max_correction_rounds": 20,
         "max_correction_reviews_per_defect": 3,
         "implementation_target_fingerprint": fingerprint,

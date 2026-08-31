@@ -34,7 +34,7 @@ V2_RECEIPT_REQUIRED = RECEIPT_REQUIRED | frozenset({
     "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile",
 })
 V2_RECEIPT_ALLOWED = V2_RECEIPT_REQUIRED | frozenset(
-    {"files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action"}
+    {"files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action", "capability_preflight", "checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable"}
 )
 LEDGER_REQUIRED = frozenset(
     {
@@ -188,6 +188,14 @@ def _receipt(value: Any, label: str) -> Mapping[str, Any]:
         _profile(receipt["resolved_profile"], f"{label}.resolved_profile")
         _digest(receipt["full_worktree_fingerprint_before"], f"{label}.full_worktree_fingerprint_before")
         _digest(receipt["full_worktree_fingerprint_after"], f"{label}.full_worktree_fingerprint_after")
+        if "capability_preflight" in receipt:
+            capabilities = _mapping(receipt["capability_preflight"], f"{label}.capability_preflight")
+            expected = {"exact_snapshot_access", "repository_inspection", "shell_execution", "test_execution", "crg_checks"}
+            if set(capabilities) != expected or any(type(value) is not bool for value in capabilities.values()):
+                raise HandoffError("E_REVIEW_CAPABILITY", f"{label}.capability_preflight must contain five boolean capabilities")
+        for key in ("checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable"):
+            if key in receipt and (not isinstance(receipt[key], list) or any(not isinstance(item, str) for item in receipt[key])):
+                raise HandoffError("E_REVIEW_EVIDENCE", f"{label}.{key} must be a list of strings")
     return receipt
 
 
@@ -207,8 +215,8 @@ def _ledger(value: Any) -> Mapping[str, Any]:
     if ledger["round_kind"] not in {"initial", "correction"}:
         raise HandoffError("E_HANDOFF_SCHEMA", "ledger.round_kind must be initial or correction")
     _integer(ledger["invocation_count"], "ledger.invocation_count", 0)
-    if ledger["max_invocations"] != 8 or ledger["max_correction_rounds"] != 20 or ledger["max_correction_reviews_per_defect"] != 3:
-        raise HandoffError("E_HANDOFF_LIMIT", "ledger must retain limits 8 invocations, 20 correction rounds, and 3 reviews per defect")
+    if ledger["max_invocations"] != 48 or ledger["max_correction_rounds"] != 20 or ledger["max_correction_reviews_per_defect"] != 3:
+        raise HandoffError("E_HANDOFF_LIMIT", "ledger must retain limits 48 invocations, 20 correction rounds, and 3 reviews per defect")
     worktree = _string(ledger["worktree"], "ledger.worktree")
     if not Path(worktree).is_absolute():
         raise HandoffError("E_HANDOFF_SCHEMA", "ledger.worktree must be absolute")
@@ -429,7 +437,7 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
     _same(ledger["review_target_fingerprint_after"], review["target_fingerprint_after"], "ledger review fingerprint after")
     if (ledger["round"] == 0) != (ledger["round_kind"] == "initial"):
         raise HandoffError("E_HANDOFF_LIMIT", "round 0 must be initial; later rounds must be correction")
-    if ledger["round"] > 20 or ledger["invocation_count"] > 8:
+    if ledger["round"] > 20 or ledger["invocation_count"] > 48:
         raise HandoffError("E_HANDOFF_LIMIT", "milestone correction-round or invocation limit exceeded")
     if ledger["invocation_count"] < (ledger["round"] + 1) * 2:
         raise HandoffError("E_HANDOFF_LIMIT", "ledger invocation_count omits a completed pair round")

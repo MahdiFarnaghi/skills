@@ -141,7 +141,7 @@ first_implementer = "claude"
         **common,
         "round_kind": "initial",
         "invocation_count": 2,
-        "max_invocations": 8,
+        "max_invocations": 48,
         "max_correction_rounds": 20,
         "max_correction_reviews_per_defect": 3,
         "implementation_target_fingerprint": handoff_fingerprint,
