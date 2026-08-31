@@ -46,7 +46,13 @@ QWEN_TLS_POLICIES = frozenset({"required", "localhost_insecure"})
 QWEN_AUTH_MODES = frozenset({"none", "explicit_env"})
 QWEN_WRITE_MODES = frozenset({"disabled", "draft_patch"})
 FAILOVER_KEYS = frozenset({"enabled", "allow_luna_worker_fallback", "require_terra_approval", "fallback_reviewer", "max_fallback_rounds"})
-CONTINUATION_KEYS = frozenset({"poll_interval_seconds", "progress_timeout_seconds", "implementation_timeout_seconds", "review_timeout_seconds", "max_transport_retries", "max_worker_retries", "receipt_recovery_retries", "max_failed_invocations", "require_durable_wakeup"})
+CONTINUATION_KEYS = frozenset({
+    "poll_interval_seconds", "progress_timeout_seconds", "implementation_timeout_seconds",
+    "review_timeout_seconds", "max_transport_retries", "max_worker_retries",
+    "receipt_recovery_retries", "max_failed_invocations", "require_durable_wakeup",
+    "lease_duration_seconds", "max_reconciliation_attempts", "require_foreground_wait",
+    "require_finalization_gate",
+})
 LIMIT_KEYS = frozenset({"max_correction_rounds", "max_correction_reviews_per_defect", "max_invocations", "max_failed_invocations"})
 
 
@@ -206,6 +212,7 @@ def _validate_v2_continuation(continuation: Mapping[str, Any], limits: Mapping[s
         "implementation_timeout_seconds": (1, 86400), "review_timeout_seconds": (1, 86400),
         "max_transport_retries": (0, 10), "max_worker_retries": (0, 10),
         "receipt_recovery_retries": (0, 3), "max_failed_invocations": (0, 48),
+        "lease_duration_seconds": (1, 86400), "max_reconciliation_attempts": (1, 20),
     }
     for key, (minimum, maximum) in integer_ranges.items():
         value = continuation[key]
@@ -215,6 +222,11 @@ def _validate_v2_continuation(continuation: Mapping[str, Any], limits: Mapping[s
         raise ConfigError("E_CONTINUATION_CONFIG", "progress timeout must be at least the poll interval")
     if type(continuation["require_durable_wakeup"]) is not bool:
         raise ConfigError("E_CONTINUATION_CONFIG", "continuation.require_durable_wakeup must be boolean")
+    for key in ("require_foreground_wait", "require_finalization_gate"):
+        if type(continuation[key]) is not bool:
+            raise ConfigError("E_CONTINUATION_CONFIG", f"continuation.{key} must be boolean")
+    if continuation["lease_duration_seconds"] < continuation["poll_interval_seconds"]:
+        raise ConfigError("E_CONTINUATION_CONFIG", "lease duration must be at least the poll interval")
     expected_limits = {
         "max_correction_rounds": (20, 20), "max_correction_reviews_per_defect": (3, 3),
         "max_invocations": (42, 256), "max_failed_invocations": (0, 48),

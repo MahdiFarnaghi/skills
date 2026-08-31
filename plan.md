@@ -446,3 +446,338 @@ tools.
 - A realistic integration test exercises implementation → review → correction
   → re-review → verification → Terra acceptance → next milestone without a
   user message or final response between automatic transitions.
+
+## Phase 4 — Add a host-native continuation supervisor and final-response gate
+
+Phase 3 made orchestration state durable, but durability alone does not keep a
+Codex turn alive. Add a host-execution supervisor that owns the complete
+dispatch → wait → receipt → route loop. Luna must drive this supervisor until
+the state machine reaches a genuine terminal state. A worker boundary must no
+longer depend on a user message to wake the task.
+
+This phase fixes the observed failure mode:
+
+```text
+dispatch worker -> emit progress as final -> user wakes task -> poll worker
+```
+
+The required behavior is:
+
+```text
+dispatch worker -> bounded wait -> collect receipt -> validate and route
+  -> dispatch next worker -> bounded wait -> ... -> terminal state -> final
+```
+
+### Separate the state engine from the execution supervisor
+
+Keep `scripts/orchestration_state.py` deterministic and host-agnostic. Add a
+closed supervisor protocol around it rather than teaching Python to invoke
+unavailable model APIs.
+
+The supervisor has two parts:
+
+- `scripts/continuation_guard.py` maintains the continuation lease, validates
+  host action/result records, reconciles active jobs, and decides whether a
+  final response is permitted.
+- Luna executes each approved host action using the actual Codex or Claude
+  tool available in its runtime, then returns the structured result to the
+  guard and state engine.
+
+The guard must return exactly one closed action at a time:
+
+```text
+dispatch_codex
+dispatch_claude
+wait_codex
+wait_claude
+recover_receipt
+validate_receipt
+run_verification
+request_terra_decision
+register_wakeup
+reconcile_job
+final_allowed
+```
+
+Unknown actions or result fields fail closed. `final_allowed` is valid only
+when the persisted orchestration state is `complete`, `blocked`, `escalated`,
+or `cancelled` and no live host job, dispatch intent, receipt recovery, or
+scheduled wakeup remains unresolved.
+
+### Make foreground waiting the default
+
+For every worker dispatch, use a foreground or tracked wait mode whenever the
+host supports it:
+
+- For Codex workers, dispatch through the approved Codex delegation mechanism,
+  persist the returned worker/job identity, then immediately use its native
+  wait operation with the latest cursor. Repeat bounded waits until the worker
+  completes or requires attention.
+- For Claude implementation, invoke `$cc:rescue --write --wait` with the exact
+  worktree and scope. For Claude review, invoke `$cc:review --wait` only when
+  it is already bound to the exact frozen worktree. Preserve the tracked job
+  identity and resume that job; never launch an unmanaged Claude process.
+- If a tool's `--wait` mode internally returns a tracked background job, treat
+  that as a running job, persist its id, and call the matching tracked-job wait
+  operation immediately.
+
+Use 60-second maximum wait windows. After each timeout, persist a heartbeat or
+progress snapshot and wait again. An unchanged timeout is not a completed
+worker, a retry, a terminal state, or permission to emit a final response.
+Use concise commentary for meaningful progress, but keep the supervisor loop
+active.
+
+Do not use a background dispatch merely to make the tool call return sooner.
+Background mode is permitted only when the host requires it or the job can
+outlive the current execution lease, and only after durable wakeup registration
+succeeds.
+
+### Add a continuation lease
+
+Extend the orchestration state and event schemas with a `continuation_lease`:
+
+```json
+{
+  "lease_id": "stable unique id",
+  "owner_role_instance_id": "current Luna orchestrator instance",
+  "host_thread_id": "current task/thread identity",
+  "acquired_at": "timestamp",
+  "heartbeat_at": "timestamp",
+  "expires_at": "timestamp",
+  "active_job_id": "nullable tracked host job id",
+  "active_job_kind": "codex|claude|null",
+  "wait_cursor": "nullable opaque host cursor",
+  "wakeup_id": "nullable durable wakeup id",
+  "status": "active|handoff_pending|released|expired"
+}
+```
+
+Acquire the lease before the first dispatch. Refresh it after dispatch, every
+bounded wait, receipt ingestion, and state transition. Only the lease owner may
+dispatch, wait, ingest a receipt, or route a result. Use compare-and-set
+generation numbers so two Luna resumptions cannot both act.
+
+An expired lease does not authorize a duplicate worker. A new Luna instance
+must first reconcile `active_job_id` with the host, adopt the existing live or
+completed job, and append a lease-handoff event. Dispatch a replacement only
+after the host proves the previous job is terminal and the retry policy allows
+it.
+
+### Add durable wakeup registration
+
+Foreground waiting should normally keep the current turn active. When the host
+will forcibly suspend the turn or a worker must run beyond the available
+execution lease, register a host-native wakeup before yielding control.
+
+The wakeup must bind:
+
+- current thread/task id;
+- orchestration task, milestone, state generation, and lease id;
+- active host job id and wait cursor;
+- earliest permitted poll time and hard deadline;
+- a resume instruction to reconcile the existing job and continue the loop;
+- an idempotency key preventing duplicate wakeups.
+
+Use a thread heartbeat/wakeup mechanism when available. Do not create an
+unrelated standalone task or cron workaround. A wakeup callback must resume the
+same task, acquire/adopt the lease, reconcile the persisted job, and execute
+the next action without requiring a user message.
+
+If durable wakeup registration is unavailable or fails, continue foreground
+waiting while the host permits it. If the host cannot continue waiting and no
+wakeup can be registered, transition to `blocked` with
+`host_continuation_unavailable` before ending. Never say “I will continue” when
+neither a wait nor a wakeup is active.
+
+### Enforce a final-response gate
+
+Add these commands to `continuation_guard.py`:
+
+```text
+acquire-lease
+heartbeat
+record-dispatch-intent
+record-dispatch-result
+record-wait-result
+record-wakeup
+reconcile
+next-action
+assert-finalizable
+release-lease
+```
+
+`assert-finalizable` must exit nonzero unless all of the following hold:
+
+- orchestration state is terminal;
+- `next_action` is null or `final_allowed`;
+- no active or ambiguously dispatched worker exists;
+- no unconsumed receipt or pending Terra decision exists;
+- no continuation wakeup remains active;
+- the lease is released as part of the same terminal transaction.
+
+Update `SKILL.md` to require Luna to call `assert-finalizable` immediately
+before every final response. Progress updates must use commentary. A sentence
+such as “I will process the receipt” or “I am waiting” is not sufficient:
+before yielding, Luna must have either completed a bounded wait and immediately
+started the next one, or persisted a valid wakeup record.
+
+Record a `premature_final_attempt` audit event whenever finalization is checked
+from a non-terminal state. The guard must not mutate the task to terminal merely
+to permit a response.
+
+### Define host adapter contracts
+
+Add `schemas/host-action.schema.json` and `schemas/host-result.schema.json`.
+Every dispatch action must include the provider, role, exact worktree, frozen
+scope, prompt artifact, invocation/idempotency id, timeout, and expected receipt
+location. Every result must include the host job id, status, cursor, progress,
+completion reason, receipt reference, and whether user attention is genuinely
+required.
+
+Normalize host statuses to:
+
+```text
+queued | running | completed | needs_attention | failed | cancelled | unknown
+```
+
+Only `completed`, `needs_attention`, `failed`, and `cancelled` are terminal host
+statuses. A wait timeout, empty progress update, tool-call return, or missing
+final text is `running` or `unknown`, not `completed`.
+
+For `unknown`, reconcile by stable job id and cursor. Never infer completion
+from elapsed time. If the host can no longer resolve a persisted job, consume
+the configured reconciliation/retry budget and escalate with the exact job
+record; do not silently redispatch.
+
+### Route receipts in the same supervisor run
+
+When a wait reports completion:
+
+1. Fetch the structured receipt and bounded findings artifact immediately.
+2. Validate invocation id, ownership, runtime binding, worktree, scope,
+   fingerprints, and read-only guarantees.
+3. Persist receipt consumption using its digest and host job id.
+4. Ask `orchestration_state.py` for the next action.
+5. Execute that action in the same supervisor loop:
+   - implementation success -> freeze and dispatch review;
+   - `needs_correction` -> dispatch the original writer;
+   - approval -> run Luna verification and request Terra's decision;
+   - accepted milestone -> advance and dispatch the next milestone writer;
+   - no-verdict failure -> retry/reconcile/fail over within policy;
+   - terminal limit or genuine authority requirement -> terminal transition.
+
+Do not place a final response between these steps. Persist every transition
+before its external side effect, then persist the side-effect result.
+
+### Distinguish progress from user attention
+
+`needs_attention` may stop foreground waiting only if the worker requires
+information or authorization that Luna and Terra cannot supply within existing
+scope. A worker asking for routine clarification, reporting review findings,
+requesting a retry, or returning `needs_correction` is automatically routable
+and must not be surfaced as a user blocker.
+
+If actual user input is required, transition to `blocked`, retain the active
+job and receipt state, release the continuation lease, and ask one precise
+question. On the user's answer, adopt the persisted state and continue without
+restarting completed work.
+
+### Implementation scope
+
+At minimum, Phase 4 should update or add:
+
+- `SKILL.md`: foreground-wait rule, no-final gate, wakeup requirement, and
+  same-run receipt routing.
+- `references/continuous-orchestration.md`: host supervisor algorithm, lease
+  lifecycle, reconciliation, wakeup, and finalization rules.
+- `scripts/continuation_guard.py`: durable lease, host action/result validation,
+  reconciliation decisions, audit events, and `assert-finalizable` CLI.
+- `scripts/orchestration_state.py`: lease generation, pending side-effect,
+  wakeup, receipt-consumption, and finalization state fields/transitions.
+- `schemas/orchestration-state.schema.json` and
+  `schemas/orchestration-event.schema.json`: lease and audit contracts.
+- `schemas/host-action.schema.json` and `schemas/host-result.schema.json`: closed
+  Codex/Claude adapter records.
+- `config/example.toml`, `configuration.md`, and `validate_config.py`: host
+  continuation capability policy, lease duration, reconciliation budget, and
+  required finalization gate.
+- `scripts/test_phase4.py`: deterministic supervisor tests using fake Codex,
+  Claude, clock, wakeup, and forced-suspension adapters.
+- `quick_validate.py`: Phase 4 schemas, guard CLI smoke test, and supervisor
+  tests.
+
+Do not add a Python process that impersonates Codex or Claude tool access. The
+guard emits validated host actions; Luna executes them through the actual tools
+and records the results.
+
+### Deterministic tests
+
+Build fake host adapters capable of delayed completion, progress cursors,
+timeouts, lost responses, duplicate results, missing receipts, forced turn
+suspension, and wakeup callbacks. Test at least:
+
+- A delayed Codex implementation receives multiple `running` wait results and
+  then automatically dispatches Claude review without a user event.
+- A delayed Claude review receives repeated bounded waits; `needs_correction`
+  automatically dispatches the original writer in the same run.
+- An unchanged poll never increments invocation/retry counters and never
+  enables finalization.
+- Every non-terminal orchestration state causes `assert-finalizable` to fail
+  and append `premature_final_attempt`.
+- Terminal state with an active/unknown job, unconsumed receipt, pending wakeup,
+  or pending Terra decision still fails finalization.
+- A forced suspension registers one idempotent wakeup; the callback adopts the
+  lease, reconciles the same job, and continues without duplicate dispatch.
+- Lease expiry and concurrent resume attempts result in one owner and one host
+  side effect.
+- Lost dispatch responses reconcile by idempotency key before any retry.
+- Receipt completion and routing survive process restart at every persistence
+  boundary.
+- Genuine user input produces `blocked`; routine review findings do not.
+
+### Real host canary test
+
+Pure state-machine tests cannot prove that Codex keeps a turn alive. Add an
+opt-in real-host canary that runs in a disposable Git worktree and uses actual
+tracked Codex and Claude worker mechanisms:
+
+1. Dispatch a worker that deliberately takes longer than one poll interval and
+   emits at least one progress update.
+2. Wait for it without a user message.
+3. Automatically dispatch the reciprocal review.
+4. Make the review return one deterministic `needs_correction` finding.
+5. Automatically dispatch correction and re-review.
+6. Complete verification and a test Terra acceptance decision.
+
+The canary passes only if one initial user request produces the complete event
+chain. Record `user_wakeup_count`; it must be zero. Record every finalization
+check; none may succeed before the terminal state. A transcript containing “I
+will continue” followed by a task end is a failure even if a later user message
+successfully resumes it.
+
+Run the canary in CI or a host integration environment with explicit worker
+credentials. Skip it locally only with a visible reason; unit tests may not be
+used as evidence that host continuation works.
+
+### Acceptance criteria
+
+- Luna remains in one supervisor run across worker completion, receipt
+  validation, correction routing, verification, and milestone advancement.
+- No user message is required to poll or route a normal worker result.
+- Foreground waits repeat at bounded intervals until a terminal host status.
+- Forced host suspension resumes through one durable thread wakeup tied to the
+  original job and orchestration generation.
+- `assert-finalizable` rejects every non-terminal state and every unresolved
+  host side effect, receipt, decision, or wakeup.
+- A progress statement cannot be emitted as the task's final response while
+  orchestration is active.
+- Restart and lease adoption never duplicate a live worker or consume a receipt
+  twice.
+- Codex and Claude adapters preserve exact worktree, scope, ownership,
+  fingerprint, and receipt contracts.
+- Retry, timeout, correction, and invocation accounting remain unchanged by
+  polling and wakeups.
+- The real-host canary completes implementation → review → correction →
+  re-review → verification → Terra acceptance with `user_wakeup_count = 0`.
+- Existing Phase 1–3 validation, handoff, state-machine, schema, and end-to-end
+  tests remain green.

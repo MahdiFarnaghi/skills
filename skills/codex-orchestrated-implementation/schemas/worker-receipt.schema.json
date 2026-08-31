@@ -39,6 +39,10 @@
     "resolved_orchestrator_profile": {"$ref": "round-ledger.schema.json#/$defs/execution_profile"},
     "full_worktree_fingerprint_before": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "full_worktree_fingerprint_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "host_job_id": {"type": "string", "minLength": 1},
+    "receipt_reference": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "finding_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "role_instance_id": {"type": "string", "minLength": 1},
     "session_id": {"type": "string", "minLength": 1},
     "host_id": {"type": "string", "minLength": 1},
@@ -63,6 +67,6 @@
   },
   "allOf": [{
     "if": {"properties": {"schema_version": {"const": 2}}},
-    "then": {"required": ["full_worktree_fingerprint_before", "full_worktree_fingerprint_after", "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile"]}
+    "then": {"required": ["full_worktree_fingerprint_before", "full_worktree_fingerprint_after", "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile", "host_job_id", "receipt_reference", "idempotency_key", "finding_ids"]}
   }]
 }

@@ -3,18 +3,44 @@
   "title": "Durable orchestration state",
   "type": "object",
   "additionalProperties": true,
-  "required": ["schema_version", "task_id", "milestone_id", "milestone_index", "state", "round", "limits", "invocation_count", "failed_invocations", "correction_reviews", "next_action"],
+  "required": ["schema_version", "task_id", "milestone_id", "milestone_index", "state", "round", "limits", "invocation_count", "failed_invocations", "correction_reviews", "next_action", "continuation_lease", "lease_generation", "pending_dispatch", "pending_receipt", "last_dispatch_intent", "last_host_result", "reconciliation_required", "reconciliation_attempts", "receipt_recovery_requested", "receipt_recovery_attempts", "pending_terra_decision", "wakeup", "consumed_receipts", "audit"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "task_id": {"type": "string", "minLength": 1},
     "milestone_id": {"type": "string", "minLength": 1},
     "milestone_index": {"type": "integer", "minimum": 1},
     "state": {"type": "string", "minLength": 1},
+    "previous_state": {"type": ["string", "null"]},
+    "created_at": {"type": "string"}, "transition_at": {"type": "string"}, "dispatch_at": {"type": ["string", "null"]}, "heartbeat_at": {"type": ["string", "null"]}, "progress_at": {"type": ["string", "null"]}, "timeout_at": {"type": ["string", "null"]},
     "round": {"type": "integer", "minimum": 0, "maximum": 20},
     "invocation_count": {"type": "integer", "minimum": 0, "maximum": 48},
     "failed_invocations": {"type": "integer", "minimum": 0, "maximum": 6},
     "correction_reviews": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 3}},
     "limits": {"type": "object", "required": ["max_correction_rounds", "max_correction_reviews_per_defect", "max_invocations", "max_failed_invocations"]},
     "next_action": {"type": ["object", "null"]}
+    ,"continuation_lease": {"anyOf": [{"$ref": "#/$defs/continuation_lease"}, {"type": "null"}]}
+    ,"lease_generation": {"type": "integer", "minimum": 0}
+    ,"pending_dispatch": {"type": ["object", "null"]}
+    ,"pending_receipt": {"type": ["object", "null"]}
+    ,"last_dispatch_intent": {"type": ["object", "null"]}
+    ,"last_host_result": {"type": ["object", "null"]}
+    ,"reconciliation_required": {"type": "boolean"}
+    ,"reconciliation_attempts": {"type": "integer", "minimum": 0}
+    ,"receipt_recovery_requested": {"type": "boolean"}
+    ,"receipt_recovery_attempts": {"type": "integer", "minimum": 0}
+    ,"pending_terra_decision": {"type": "boolean"}
+    ,"wakeup": {"type": ["object", "null"]}
+    ,"wakeup_required": {"type": "boolean"}
+    ,"consumed_receipts": {"type": "object", "additionalProperties": {"type": "string"}}
+    ,"audit": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "continuation_lease": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lease_id", "owner_role_instance_id", "host_thread_id", "acquired_at", "heartbeat_at", "expires_at", "active_job_id", "active_job_kind", "wait_cursor", "wakeup_id", "status", "generation"],
+      "properties": {
+        "lease_id": {"type": "string", "minLength": 1}, "owner_role_instance_id": {"type": "string", "minLength": 1}, "host_thread_id": {"type": "string", "minLength": 1}, "acquired_at": {"type": "string"}, "heartbeat_at": {"type": "string"}, "expires_at": {"type": "string"}, "active_job_id": {"type": ["string", "null"]}, "active_job_kind": {"enum": ["codex", "claude", null]}, "wait_cursor": {"type": ["string", "null"]}, "wakeup_id": {"type": ["string", "null"]}, "status": {"enum": ["active", "handoff_pending", "released", "expired"]}, "generation": {"type": "integer", "minimum": 0}
+      }
+    }
   }
 }

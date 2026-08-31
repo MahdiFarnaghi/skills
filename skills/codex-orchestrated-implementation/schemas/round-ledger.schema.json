@@ -46,6 +46,7 @@
     "round": {"type": "integer", "minimum": 0},
     "round_kind": {"enum": ["initial", "correction"]},
     "invocation_count": {"type": "integer", "minimum": 0, "maximum": 48},
+    "max_failed_invocations": {"type": "integer", "minimum": 0, "maximum": 6},
     "max_invocations": {"const": 48},
     "max_correction_rounds": {"const": 20},
     "max_correction_reviews_per_defect": {"const": 3},

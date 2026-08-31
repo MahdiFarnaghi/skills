@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-action.schema.json",
+  "title": "Luna host adapter action",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action"],
+  "properties": {
+    "action": {"enum": ["dispatch_codex", "dispatch_claude", "wait_codex", "wait_claude", "recover_receipt", "validate_receipt", "run_verification", "request_terra_decision", "register_wakeup", "reconcile_job", "final_allowed"]},
+    "task_id": {"type": "string", "minLength": 1}, "milestone_id": {"type": "string", "minLength": 1},
+    "milestone_index": {"type": "integer", "minimum": 1}, "round": {"type": "integer", "minimum": 0}, "state_generation": {"type": "integer", "minimum": 0}, "lease_id": {"type": "string", "minLength": 1},
+    "job_id": {"type": ["string", "null"]}, "cursor": {"type": ["string", "null"]},
+    "provider": {"enum": ["codex", "claude_code"]}, "role": {"type": "string", "minLength": 1}, "role_instance_id": {"type": "string", "minLength": 1}, "session_id": {"type": "string", "minLength": 1}, "context_id": {"type": "string", "minLength": 1}, "host_id": {"type": "string", "minLength": 1}, "resolved_profile": {"type": "object"}, "resolved_orchestrator_profile": {"type": "object"}, "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "phase": {"enum": ["implementation", "review", "correction", "rereview"]},
+    "worktree": {"type": "string", "pattern": "^/"},
+    "path_scope": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "prompt_artifact": {"type": "string", "minLength": 1}, "invocation_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1}, "timeout_seconds": {"type": "integer", "minimum": 1},
+    "receipt_location": {"type": "string", "minLength": 1}, "earliest_poll_at": {"type": "string", "minLength": 1},
+    "hard_deadline": {"type": "string", "minLength": 1}, "reason": {"type": "string"}
+  },
+  "allOf": [{"if": {"properties": {"action": {"enum": ["dispatch_codex", "dispatch_claude"]}}}, "then": {"required": ["provider", "role", "worktree", "path_scope", "prompt_artifact", "invocation_id", "idempotency_key", "timeout_seconds", "receipt_location"]}}, {"if": {"properties": {"action": {"enum": ["wait_codex", "wait_claude", "reconcile_job"]}}}, "then": {"required": ["timeout_seconds"]}}]
+}

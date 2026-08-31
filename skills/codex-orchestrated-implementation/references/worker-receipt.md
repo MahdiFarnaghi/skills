@@ -15,6 +15,15 @@ Every worker invocation must provide a compact receipt conforming to
 - implementation or review conclusion;
 - next recommended action.
 
+For v2 review receipts, include `capability_preflight` with boolean results
+for exact-snapshot access, repository inspection, shell execution, test
+execution, and configured CRG checks. List checks in exactly one of
+`checks_performed`, `checks_supplied_by_orchestrator`, or
+`checks_unavailable`. Luna owns fingerprints and authoritative verification;
+the reviewer must make unavailable capabilities visible to Terra. A reviewer
+without exact-snapshot access has no verdict and must be replaced or
+escalated. A receipt is consumed by invocation id and digest exactly once.
+
 Generate each target fingerprint with
 `scripts/validate_handoff.py --fingerprint-worktree <absolute-worktree>
 --scope-path <path> ...`. Terra validates the receipt against the actual

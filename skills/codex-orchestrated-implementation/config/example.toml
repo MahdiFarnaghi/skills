@@ -37,6 +37,10 @@ poll_interval_seconds = 60
 receipt_recovery_retries = 1
 max_failed_invocations = 6
 require_durable_wakeup = true
+lease_duration_seconds = 120
+max_reconciliation_attempts = 3
+require_foreground_wait = true
+require_finalization_gate = true
 
 [limits]
 max_correction_rounds = 20

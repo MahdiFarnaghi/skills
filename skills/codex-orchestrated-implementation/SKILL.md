@@ -135,6 +135,36 @@ do not emit a final response while a worker is active or an automatic next
 action is available. A completed receipt must immediately be validated and
 routed to review, correction, verification, or Terra as applicable.
 
+The host continuation supervisor owns that complete loop. Acquire its lease
+before dispatch, prefer foreground/tracked waits of no more than 60 seconds,
+and persist a heartbeat after every wait. If the host must suspend the turn,
+register one idempotent thread wakeup bound to the current job, lease, and
+state generation before yielding. Reconcile an existing job before any retry
+or redispatch. Receipt collection, validation, correction, verification,
+Terra acceptance, and milestone advancement happen in the same supervisor run;
+routine worker boundaries are not terminal states.
+
+Luna follows this imperative loop:
+
+```text
+load and lock durable state
+while state is non-terminal:
+    reconcile persisted active job with the host
+    if a job is active: bounded wait, persist progress, continue
+    if a receipt is available: ingest and validate it exactly once
+    compute one closed next host action
+    persist the transition before its side effect
+    dispatch, verify, route, retry, or escalate as selected
+release lock
+assert-finalizable immediately before the final response
+```
+
+The final-response gate rejects every non-terminal state and every unresolved
+job, dispatch intent, receipt, Terra decision, wakeup, or lease. Progress
+commentary is allowed while the loop is active, but it is never a substitute
+for a bounded wait, a persisted wakeup, or a successful
+`continuation_guard.py assert-finalizable` check.
+
 An invocation is every attempted worker execution, including setup,
 transport, authentication, and timeout failures. An initial round is one
 implementation invocation plus one review invocation over one frozen snapshot.

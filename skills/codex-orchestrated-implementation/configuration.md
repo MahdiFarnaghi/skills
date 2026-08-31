@@ -49,7 +49,7 @@ enabled = true
 [[pair]]
 name = "claude_worker"
 provider = "claude_code"
-model = "opus"
+model = "glm-5.3[1m]"
 enabled = true
 
 [workflow]
@@ -100,3 +100,20 @@ and two worker retries. Limits are 20 correction rounds, three reviews per
 defect, 48 total worker invocations, and six failed invocations. The total
 invocation limit must cover the initial pair, all configured correction rounds,
 and the failed-invocation budget.
+
+The continuation policy also controls the host supervisor boundary. The lease
+duration must be at least the polling interval; reconciliation attempts are
+finite; foreground waiting is required by default; and the finalization gate
+is mandatory. These fields are closed and unknown keys are rejected:
+
+```toml
+lease_duration_seconds = 120
+max_reconciliation_attempts = 3
+require_foreground_wait = true
+require_finalization_gate = true
+```
+
+Polling and wakeups never count as worker invocations. A lease handoff first
+reconciles the persisted job id, and a final response is allowed only after
+the terminal state, host side effects, receipts, Terra decision, wakeup, and
+lease are all resolved.

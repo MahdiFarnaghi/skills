@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-result.schema.json",
+  "title": "Luna host adapter result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host_job_id", "status", "cursor", "progress", "completion_reason", "receipt_reference", "user_attention_required"],
+  "properties": {
+    "host_job_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["queued", "running", "completed", "needs_attention", "failed", "cancelled", "unknown"]},
+    "cursor": {"type": ["string", "null"]}, "progress": {}, "completion_reason": {"type": "string"},
+    "receipt_reference": {"type": ["string", "null"]}, "user_attention_required": {"type": "boolean"},
+    "action_id": {"type": "string", "minLength": 1}, "invocation_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1}, "error": {"type": "string"},
+    "wakeup_required": {"type": "boolean"}
+  }
+}

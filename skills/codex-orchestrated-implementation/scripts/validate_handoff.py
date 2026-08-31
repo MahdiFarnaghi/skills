@@ -32,9 +32,10 @@ RECEIPT_ALLOWED = RECEIPT_REQUIRED | frozenset(
 V2_RECEIPT_REQUIRED = RECEIPT_REQUIRED | frozenset({
     "full_worktree_fingerprint_before", "full_worktree_fingerprint_after",
     "role_instance_id", "session_id", "host_id", "context_id", "resolved_profile",
+    "host_job_id", "receipt_reference", "idempotency_key", "finding_ids",
 })
 V2_RECEIPT_ALLOWED = V2_RECEIPT_REQUIRED | frozenset(
-    {"files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action", "capability_preflight", "checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable"}
+    {"host_job_id", "receipt_reference", "idempotency_key", "finding_ids", "files_changed", "files_inspected", "commands", "failures", "warnings", "limitations", "findings", "next_action", "capability_preflight", "checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable"}
 )
 LEDGER_REQUIRED = frozenset(
     {
@@ -196,6 +197,15 @@ def _receipt(value: Any, label: str) -> Mapping[str, Any]:
         for key in ("checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable"):
             if key in receipt and (not isinstance(receipt[key], list) or any(not isinstance(item, str) for item in receipt[key])):
                 raise HandoffError("E_REVIEW_EVIDENCE", f"{label}.{key} must be a list of strings")
+        sources = [set(receipt.get(key, [])) for key in ("checks_performed", "checks_supplied_by_orchestrator", "checks_unavailable")]
+        if any(sources[index] & sources[j] for index in range(3) for j in range(index + 1, 3)):
+            raise HandoffError("E_REVIEW_EVIDENCE", f"{label} must assign each check to exactly one evidence source")
+        if "capability_preflight" in receipt:
+            capability_to_check = {"repository_inspection": "repository_inspection", "shell_execution": "shell_execution", "test_execution": "test_execution", "crg_checks": "crg_checks"}
+            unavailable = set(receipt.get("checks_unavailable", []))
+            for capability, check in capability_to_check.items():
+                if receipt["capability_preflight"][capability] is False and check not in unavailable and check not in set(receipt.get("checks_supplied_by_orchestrator", [])):
+                    raise HandoffError("E_REVIEW_EVIDENCE", f"{label}.{check} is unavailable but not declared")
     return receipt
 
 
@@ -439,6 +449,11 @@ def validate_handoff(config: ResolvedConfig, implementation_value: Any, review_v
         raise HandoffError("E_HANDOFF_LIMIT", "round 0 must be initial; later rounds must be correction")
     if ledger["round"] > 20 or ledger["invocation_count"] > 48:
         raise HandoffError("E_HANDOFF_LIMIT", "milestone correction-round or invocation limit exceeded")
+    # A completed handoff may include failed attempts, but not more than the
+    # six-attempt failure reserve for its completed rounds.
+    successful_budget = (ledger["round"] + 1) * 2
+    if ledger["invocation_count"] > successful_budget + 6:
+        raise HandoffError("E_HANDOFF_LIMIT", "ledger invocation_count exceeds successful rounds plus failure reserve")
     if ledger["invocation_count"] < (ledger["round"] + 1) * 2:
         raise HandoffError("E_HANDOFF_LIMIT", "ledger invocation_count omits a completed pair round")
     _same(_git_head(ledger["worktree"]), ledger["baseline"]["head_commit"], "Git HEAD")
