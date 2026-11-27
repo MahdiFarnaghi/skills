@@ -51,6 +51,27 @@ The orchestration skill also supports Terra-approved Claude failover. A Claude
 quota or transport failure is recorded without a verdict; Luna can continue
 only with a distinct worker session and independent review context.
 
+### `utwente-hpc`
+
+Operates the University of Twente EEMCS-HPC Slurm cluster over SSH through a
+thin wrapper (`scripts/hpc.sh`) that runs every remote command on a head node
+inside a login shell (`--host hpc1|hpc2|auto` picks the head node). It covers
+orientation (partitions you may use, QOS limits, node classes with idle counts),
+a contention-aware machine picker (`hpc pick --vram 48 --gpus 1 --avoid itc-gpu` ranks the
+node classes you may use by idle nodes and 7-day occupancy and emits a ready-to-paste
+`#SBATCH` header), a `hpc busyness` report (occupancy by weekday/4-hour window, queue
+wait per partition, pending demand), rsync sync, Python/CUDA environment setup, sbatch
+templates (GPU, CPU, parameter arrays, GPU smoke test), validation with
+`sbatch --test-only`, submission, monitoring, log retrieval, bounded waits, and
+debugging of failed/OOM jobs. A verified cluster reference records the site
+quirks: nodes are exclusive, `module avail`/`show` and the `conda` CLI hang over
+ssh, `pip install --user` is blocked, `--mem` rejects decimals, and
+`--test-only` ignores partition permissions.
+
+Use it when the user mentions the UT/Twente HPC cluster, EEMCS-HPC, `hpc-head`,
+`ewi.utwente.nl`, Slurm commands, or wants training or batch jobs run on the
+cluster. The SSH alias defaults to `hpc1` (`--host` / `HPC_HOST` to override).
+
 ## Installation
 
 ### Codex
@@ -62,6 +83,7 @@ mkdir -p ~/.codex/skills
 cp -R skills/anki-creator ~/.codex/skills/
 cp -R skills/codex-reviewed-implementation ~/.codex/skills/
 cp -R skills/codex-orchestrated-implementation ~/.codex/skills/
+cp -R skills/utwente-hpc ~/.codex/skills/
 ```
 
 Restart or refresh Codex so it reloads the skill catalog. Invoke a skill by
@@ -76,6 +98,7 @@ mkdir -p ~/.claude/skills
 cp -R skills/anki-creator ~/.claude/skills/
 cp -R skills/codex-reviewed-implementation ~/.claude/skills/
 cp -R skills/codex-orchestrated-implementation ~/.claude/skills/
+cp -R skills/utwente-hpc ~/.claude/skills/
 ```
 
 The orchestration skill expects the supported Claude Code companion capabilities
